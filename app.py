@@ -26,6 +26,7 @@ Supuestos configurables (todos ajustables desde la UI, no hardcodeados):
 """
 
 import datetime
+import math
 from io import BytesIO
 
 import pandas as pd
@@ -252,7 +253,9 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str) -> pd.DataFrame:
 
     pr = agg.apply(_clasificar, axis=1, result_type="expand")
     agg["prioridad"], agg["prioridad_label"] = pr[0], pr[1]
-    agg["pallets"] = agg["pallets"].round(2)
+    # Los pallets de una OC siempre se redondean HACIA ARRIBA (nunca decimales):
+    # una OC que ocupa 5.4 o 5.6 reserva igual 6 posiciones de pallet.
+    agg["pallets"] = agg["pallets"].apply(lambda v: math.ceil(round(v, 6)))
     agg["monto"] = agg["monto"].round(0)
     # OC con 0 pallets (linea unica que quedo en 0 tras excluir directos) no
     # necesita camion; se deja fuera del bin-packing.
@@ -408,9 +411,18 @@ _COLOR_PRIORIDAD = {1: "#1DB980", 2: "#0B4F86", 5: "#F2994A", 3: "#E4572E"}
 _ORDEN_DIAS = ["Lunes", "Martes", "Miercoles", "Miércoles", "Jueves", "Viernes", "Sabado", "Sábado"]
 
 
-def render_calendario(detalle: pd.DataFrame):
-    """Vista tipo calendario/kanban: una columna por dia, tarjetas por OC con
-    Pedido, OC, Monto y Pallets - igual al tablero de referencia."""
+def _semaforo_utilizacion(pct: float) -> str:
+    if pct >= 90:
+        return "#1DB980"  # verde
+    if pct >= 70:
+        return "#F2994A"  # amarillo/naranjo
+    return "#E4572E"      # rojo
+
+
+def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None):
+    """Vista tipo calendario/kanban: una columna por dia, con un KPI de
+    despacho arriba (camiones y utilizacion con semaforo) y tarjetas por OC
+    con Pedido, OC, Monto y Pallets."""
     if detalle.empty:
         st.info("No hay OC para mostrar en el calendario.")
         return
@@ -422,20 +434,37 @@ def render_calendario(detalle: pd.DataFrame):
         sub = detalle[detalle["Día"] == dia]
         fecha = sub["Fecha"].iloc[0] if "Fecha" in sub.columns and len(sub) else None
         fecha_str = fecha.strftime("%d-%b") if hasattr(fecha, "strftime") else ""
+
+        # KPI de despacho del dia: camiones y utilizacion promedio (semaforo)
+        n_camiones_dia, util_prom, color_kpi = 0, 0.0, "#9CA3AF"
+        if resumen is not None and not resumen.empty and "Día" in resumen.columns:
+            r_dia = resumen[resumen["Día"] == dia]
+            if not r_dia.empty:
+                n_camiones_dia = len(r_dia)
+                util_prom = r_dia["Utilización %"].mean()
+                color_kpi = _semaforo_utilizacion(util_prom)
+
         with col:
             st.markdown(
                 f"<div style='font-weight:700;font-size:0.95rem;color:#16232E;'>{dia}</div>"
-                f"<div style='color:#6b7280;font-size:0.78rem;margin-bottom:0.4rem;'>"
-                f"{fecha_str} · {len(sub)} OC</div>",
+                f"<div style='color:#6b7280;font-size:0.78rem;margin-bottom:0.45rem;'>"
+                f"{fecha_str} · {len(sub)} OC</div>"
+                f"<div style='background:{color_kpi}1A;border:1px solid {color_kpi};"
+                f"border-radius:8px;padding:0.4rem 0.6rem;margin-bottom:0.6rem;'>"
+                f"<div style='font-size:0.68rem;color:#374151;font-weight:600;'>"
+                f"🚚 {n_camiones_dia} camión(es)</div>"
+                f"<div style='font-size:0.68rem;color:{color_kpi};font-weight:700;'>"
+                f"{util_prom:.0f}% utilización promedio</div>"
+                f"</div>",
                 unsafe_allow_html=True,
             )
-            with st.container(height=650):
+            with st.container(height=600):
                 for ventana, sub_v in sub.groupby("Ventana"):
                     total_pallets = sub_v["Pallets"].sum()
                     st.markdown(
                         f"<div style='font-size:0.68rem;font-weight:700;color:#0B4F86;"
                         f"letter-spacing:0.03em;margin:0.5rem 0 0.35rem;'>"
-                        f"VENTANA {ventana} · {total_pallets:.1f} pal</div>",
+                        f"VENTANA {ventana} · {total_pallets:.0f} pal</div>",
                         unsafe_allow_html=True,
                     )
                     for _, row in sub_v.sort_values("Prioridad").iterrows():
@@ -459,7 +488,7 @@ def render_calendario(detalle: pd.DataFrame):
                                     margin-top:0.3rem;font-size:0.76rem;'>
                                     <span>{formato_clp(row['Monto'])}</span>
                                     <span style='color:#0B4F86;font-weight:600;'>
-                                        {row['Pallets']:.2f} pal
+                                        {row['Pallets']:.0f} pal
                                     </span>
                                 </div>
                             </div>""",
@@ -492,13 +521,13 @@ def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
             ws = writer.sheets["Detalle Pedidos"]
             col_pallets = detalle.columns.get_loc("Pallets") + 1
             for r in range(2, len(detalle) + 2):
-                ws.cell(row=r, column=col_pallets).number_format = "0.00"
+                ws.cell(row=r, column=col_pallets).number_format = "0"
         if "Pallets cargados" in resumen.columns:
             ws = writer.sheets["Plan Despacho"]
             col_pallets = resumen.columns.get_loc("Pallets cargados") + 1
             col_util = resumen.columns.get_loc("Utilización %") + 1
             for r in range(2, len(resumen) + 2):
-                ws.cell(row=r, column=col_pallets).number_format = "0.00"
+                ws.cell(row=r, column=col_pallets).number_format = "0"
                 ws.cell(row=r, column=col_util).number_format = "0.0"
     return buf.getvalue()
 
@@ -602,7 +631,7 @@ def render():
     st.subheader("Plan de camiones")
     st.dataframe(
         resumen.style.format({
-            "Pallets cargados": "{:.2f}",
+            "Pallets cargados": "{:.0f}",
             "Capacidad": "{:.0f}",
             "Utilización %": "{:.1f}",
         }),
@@ -610,19 +639,19 @@ def render():
     )
 
     st.subheader("Detalle por OC (van en camión)")
-    tab_tabla, tab_calendario = st.tabs(["📋 Tabla", "🗓️ Calendario"])
+    tab_calendario, tab_tabla = st.tabs(["🗓️ Calendario", "📋 Tabla"])
+    with tab_calendario:
+        st.caption("Una columna por día, tarjetas con Pedido, OC, Monto y Pallets — "
+                   "ordenadas por ventana y prioridad.")
+        render_calendario(detalle, resumen)
     with tab_tabla:
         st.caption("Las filas en verde ya aparecen como Facturadas en la tabla externa.")
         st.dataframe(
             detalle.style.apply(_resaltar_facturado, axis=1).format({
-                "Pallets": "{:.2f}", "Monto": lambda v: formato_clp(v),
+                "Pallets": "{:.0f}", "Monto": lambda v: formato_clp(v),
             }),
             use_container_width=True, hide_index=True,
         )
-    with tab_calendario:
-        st.caption("Una columna por día, tarjetas con Pedido, OC, Monto y Pallets — "
-                   "ordenadas por ventana y prioridad.")
-        render_calendario(detalle)
 
     if not tabla_directos.empty:
         st.subheader("Directos (información, NO ocupan camión/ventana)")
