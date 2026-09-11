@@ -57,9 +57,18 @@ _BRAND_CSS = """
 .medcell-header h1 {
     color: #FFFFFF;
     font-size: 1.9rem;
-    font-weight: 700;
+    font-weight: 800;
     margin: 0;
     letter-spacing: -0.01em;
+    text-transform: uppercase;
+}
+.medcell-header h1 .brand-accent {
+    color: #8ECFFF;
+}
+.medcell-header .dev {
+    color: #7A93AC;
+    font-size: 0.78rem;
+    margin: 0.15rem 0 0 0;
 }
 .medcell-header p {
     color: #BFD9F2;
@@ -86,7 +95,8 @@ def _header():
     st.markdown(
         """
         <div class="medcell-header">
-            <h1>🚚 Medcell Despacho <span class="tag">SB</span></h1>
+            <h1>🚚 MEDCELL <span class="brand-accent">DESPACHO</span></h1>
+            <div class="dev">Desarrollado por Sebastián Alexis Pérez López</div>
             <p>Plan de despacho semanal: distribuye las OC en camiones de 13/16 pallets,
             respetando Farma / Consumo Masivo, Directos y Facturados.</p>
         </div>
