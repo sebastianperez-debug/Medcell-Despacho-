@@ -26,6 +26,15 @@ paletizado).
 7. Descarga el resultado como Excel (`Plan Despacho`, `Detalle Pedidos`,
    `Directos`).
 
+## Archivo de datos (Refresh)
+
+Puedes dejar guardada una copia del Refresh directamente en el repo, en
+`data/Refresh.xlsx`. Si no subes nada en la app, se usa automáticamente esa
+copia (igual que en Medcell Almacenamiento). Para actualizarla cada semana:
+reemplaza ese archivo en GitHub y haz commit — o simplemente sube uno más
+nuevo desde el panel "📂 Fuente de datos" en la barra lateral sin tocar el
+repo, si prefieres no dejarlo guardado ahí.
+
 ## Cómo correrla localmente
 
 ```bash
@@ -35,11 +44,9 @@ streamlit run app.py
 
 ## Cómo actualizar los Facturados cada semana
 
-Reemplaza el archivo `facturados.xlsx` en la raíz del repo (columna
-`Pedido` con los números ya facturados) y haz commit/push. La app lo lee
-automáticamente. Si alguna semana no alcanzas a actualizarlo en GitHub,
-puedes subir uno manualmente desde el panel "🟩 Facturados (opcional)"
-dentro de la app — ese sube por sobre el del repo, solo para esa sesión.
+Se detecta automáticamente desde la pestaña **OC** del mismo Refresh
+(columna "Pedido de Venta" con "Pendiente" = 0 → ya despachado). No hay que
+mantener ningún archivo aparte para esto.
 
 ## Despliegue (Streamlit Community Cloud)
 
@@ -54,7 +61,8 @@ dentro de la app — ese sube por sobre el del repo, solo para esa sesión.
 ```
 medcell-despacho/
 ├── app.py                   # App principal (toda la lógica + UI)
-├── facturados.xlsx           # Tabla que mantienes tú, semana a semana
+├── data/
+│   └── Refresh.xlsx          # (opcional) copia del Refresh que mantienes en el repo
 ├── requirements.txt
 ├── .gitignore
 ├── README.md
