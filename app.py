@@ -116,18 +116,50 @@ def leer_sb(archivo) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
-# 1b. FACTURADOS (tabla externa que mantienes tu en el repo de GitHub)
+# 1b. FACTURADOS
 # --------------------------------------------------------------------------
+# Fuente principal (automatica): pestana "OC" del MISMO Refresh que ya subes.
+#   "Pedido de Venta" = mismo numero que "Pedido" en SB.
+#   "Pendiente" = 0 (sumado por Pedido de Venta) -> ya se despacho/facturo.
+# Fuente opcional (respaldo/override manual): archivo facturados.xlsx en el
+#   repo, o uno subido a mano en la app, por si hay algo mas reciente que
+#   todavia no refleja el Refresh.
 
-# Nombre del archivo que subiras junto a este .py en tu repo. Debe tener al
-# menos una columna "Pedido" (o "OC") con los numeros ya facturados.
 ARCHIVO_FACTURADOS_DEFAULT = "facturados.xlsx"
 
 
+@st.cache_data(show_spinner="Revisando pestaña OC del Refresh...")
+def cargar_facturados_desde_refresh(archivo) -> set:
+    """Detecta automaticamente los Pedido ya 100% despachados/facturados
+    usando la pestana 'OC' del mismo Refresh (columnas 'Pedido de Venta' y
+    'Pendiente')."""
+    try:
+        archivo.seek(0)
+    except Exception:
+        pass
+    try:
+        df_oc = pd.read_excel(archivo, sheet_name="OC")
+    except Exception:
+        return set()
+    finally:
+        try:
+            archivo.seek(0)
+        except Exception:
+            pass
+
+    df_oc.columns = [str(c).strip() for c in df_oc.columns]
+    if "Pedido de Venta" not in df_oc.columns or "Pendiente" not in df_oc.columns:
+        return set()
+
+    pendiente_total = df_oc.groupby("Pedido de Venta")["Pendiente"].sum()
+    ya_facturados = pendiente_total[pendiente_total <= 0].index
+    return {str(int(x)) for x in ya_facturados if pd.notna(x)}
+
+
 def cargar_facturados(archivo_subido=None, ruta_local: str = ARCHIVO_FACTURADOS_DEFAULT) -> set:
-    """Devuelve el set de numeros de Pedido marcados como Facturados.
-    Prioriza el archivo subido manualmente en la app; si no hay, busca el
-    archivo local (el que mantienes tu en el repo)."""
+    """Devuelve el set de numeros de Pedido marcados como Facturados en el
+    archivo externo (opcional): prioriza el subido manualmente en la app;
+    si no hay, busca el archivo local (el que mantienes en el repo)."""
     import os
 
     df_fact = None
@@ -440,19 +472,32 @@ def render():
                    "2) cubierto con Pronto-vence, 5) parcial sin cobertura, 3) sin 1er Posible.")
         orden_prioridad = [1, 2, 5, 3]
 
-    with st.expander("🟩 Facturados (opcional)"):
+    with st.expander("🟩 Facturados"):
         st.caption(
-            f"La app busca automáticamente el archivo `{ARCHIVO_FACTURADOS_DEFAULT}` "
-            "junto a esta página en el repo. Si esta semana aún no lo has actualizado "
-            "ahí, puedes subirlo manualmente aquí y se usa ese en su lugar."
+            "Se detecta automáticamente desde la pestaña **OC** del mismo Refresh que "
+            "subiste (Pedido de Venta con Pendiente = 0 → ya despachado/facturado). "
+            "No necesitas mantener ningún archivo aparte."
         )
-        archivo_facturados = st.file_uploader(
-            "Subir/reemplazar tabla de Facturados (Excel o CSV, columna 'Pedido')",
-            type=["xlsx", "csv"], key="facturados_upload",
+        usar_archivo_extra = st.checkbox(
+            "Agregar/forzar Facturados desde un archivo externo (opcional, por si hay "
+            "algo más reciente que el Refresh todavía no refleja)"
         )
-    facturados = cargar_facturados(archivo_facturados)
+        archivo_facturados = None
+        if usar_archivo_extra:
+            archivo_facturados = st.file_uploader(
+                f"Subir tabla de Facturados (Excel/CSV, columna 'Pedido') — o se usa "
+                f"`{ARCHIVO_FACTURADOS_DEFAULT}` del repo si no subes nada",
+                type=["xlsx", "csv"], key="facturados_upload",
+            )
+
+    facturados_refresh = cargar_facturados_desde_refresh(archivo)
+    facturados_extra = cargar_facturados(archivo_facturados) if usar_archivo_extra else set()
+    facturados = facturados_refresh | facturados_extra
     if facturados:
-        st.caption(f"✅ {len(facturados)} pedidos cargados como Facturados.")
+        st.caption(
+            f"✅ {len(facturados_refresh)} pedidos detectados como Facturados desde el "
+            f"Refresh" + (f" + {len(facturados_extra)} desde archivo externo" if facturados_extra else "") + "."
+        )
 
     if not capacidades or not dias:
         st.warning("Elige al menos una capacidad de camión y un día hábil.")
