@@ -218,7 +218,11 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str) -> pd.DataFrame:
         pos1=("1 Posible", "sum"),
         pv=("Pronto-vence", "sum"),
         pallets=(pallet_col, "sum"),
-        monto=("Posible actual $", "sum"),
+        # "Posible actual $" se pone en $0 apenas la OC queda 100% despachada
+        # (ya no hay nada "posible" pendiente), asi que para reflejar el
+        # valor real de la OC (y cuanto se despacho de verdad) usamos
+        # "Solicitado $", que no se resetea a 0.
+        monto=("Solicitado $", "sum"),
         n_sku=("Pedido", "count"),
     ).reset_index()
 
