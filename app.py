@@ -584,21 +584,26 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
 
 
 def exportar_pendientes_excel(detalle: pd.DataFrame) -> bytes | None:
-    """Excel SOLO con las OC que no alcanzaron ventana esta semana (overflow):
-    Hoja 'Resumen' = tabla pivote División (filas) x Fecha vence (columnas),
-    igual estilo a la tabla de referencia (categorías al costado, fechas
-    arriba); luego una pestaña por fecha con el detalle completo."""
+    """Excel SOLO con las OC que TODAVIA NO se facturan (Facturado = No, las
+    filas blancas de la tabla): Hoja 'Resumen' = tabla pivote División (filas)
+    x Día de despacho (columnas), igual estilo a la tabla de referencia
+    (categorías al costado, arriba); luego una pestaña por día con el
+    detalle completo."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-    pendientes = detalle[detalle["Día"] == "SIN VENTANA"].copy()
+    pendientes = detalle[detalle["Facturado"] == "No"].copy()
     if pendientes.empty:
         return None
 
-    pendientes["Fecha vence"] = pd.to_datetime(pendientes["Fecha vence"]).dt.date
+    orden_dias_cols = [d for d in _ORDEN_DIAS if d in pendientes["Día"].unique()]
+    if "SIN VENTANA" in pendientes["Día"].unique():
+        orden_dias_cols.append("SIN VENTANA")
+
     pivote = pd.pivot_table(
-        pendientes, index="División", columns="Fecha vence",
+        pendientes, index="División", columns="Día",
         values="Pedido (OC)", aggfunc="count", fill_value=0,
     )
+    pivote = pivote.reindex(columns=orden_dias_cols, fill_value=0)
     pivote["Total general"] = pivote.sum(axis=1)
     pivote.loc["Total general"] = pivote.sum(axis=0)
 
@@ -606,9 +611,10 @@ def exportar_pendientes_excel(detalle: pd.DataFrame) -> bytes | None:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         pivote.to_excel(writer, sheet_name="Resumen", index=True)
 
-        for fecha, sub in pendientes.groupby("Fecha vence"):
-            nombre_hoja = fecha.strftime("%d-%m-%Y")[:31]
-            sub.drop(columns=["Día", "Ventana", "Fecha"], errors="ignore").to_excel(
+        for dia in orden_dias_cols:
+            sub = pendientes[pendientes["Día"] == dia]
+            nombre_hoja = dia[:31]
+            sub.drop(columns=["Día"], errors="ignore").to_excel(
                 writer, sheet_name=nombre_hoja, index=False
             )
 
@@ -809,16 +815,16 @@ def render():
             )
     with col_desc_b:
         if excel_pendientes:
-            n_pend = int((detalle["Día"] == "SIN VENTANA").sum())
+            n_pend = int((detalle["Facturado"] == "No").sum())
             st.download_button(
-                f"⬇️ Descargar pendientes sin ventana (Excel) · {n_pend} OC",
+                f"⬇️ Descargar no facturadas (Excel) · {n_pend} OC",
                 data=excel_pendientes,
                 file_name=f"Pendientes_S{semana}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
         else:
-            st.success("✅ Sin pendientes: todas las OC quedaron con ventana asignada.")
+            st.success("✅ Todas las OC de esta semana ya aparecen como Facturadas.")
 
     st.subheader("Plan de camiones")
     st.caption("Los números de Pedido en verde ya aparecen como Facturados. "
