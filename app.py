@@ -246,12 +246,14 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str) -> pd.DataFrame:
         pos1=("1 Posible", "sum"),
         pv=("Pronto-vence", "sum"),
         pallets=(pallet_col, "sum"),
+        monto=("Posible actual $", "sum"),
         n_sku=("Pedido", "count"),
     ).reset_index()
 
     pr = agg.apply(_clasificar, axis=1, result_type="expand")
     agg["prioridad"], agg["prioridad_label"] = pr[0], pr[1]
     agg["pallets"] = agg["pallets"].round(2)
+    agg["monto"] = agg["monto"].round(0)
     # OC con 0 pallets (linea unica que quedo en 0 tras excluir directos) no
     # necesita camion; se deja fuera del bin-packing.
     agg = agg[agg["pallets"] > 0].reset_index(drop=True)
@@ -338,6 +340,7 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
             it["camion_num"] = i + 1
             it["dia"] = slot["dia"]
             it["ventana"] = slot["ventana"]
+            it["fecha"] = slot["fecha"]
     return bins, slots, overflow
 
 
@@ -376,9 +379,9 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
                 "Pedido (OC)": it["Pedido"], "OC": it["oc"], "Fecha vence": it["fecha_vence"],
                 "División": it["division"],
                 "Prioridad": it["prioridad"], "Descripción prioridad": it["prioridad_label"],
-                "Pallets": it["pallets"], "# SKUs": it["n_sku"],
-                "Camión #": it["camion_num"], "Día": it["dia"], "Ventana": it["ventana"],
-                "Facturado": "Sí" if es_facturado else "No",
+                "Pallets": it["pallets"], "Monto": it.get("monto", 0), "# SKUs": it["n_sku"],
+                "Camión #": it["camion_num"], "Día": it["dia"], "Fecha": it.get("fecha"),
+                "Ventana": it["ventana"], "Facturado": "Sí" if es_facturado else "No",
             })
     detalle = pd.DataFrame(detalle_rows)
 
@@ -392,6 +395,76 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
 def _resaltar_facturado(row):
     color = "background-color: #C6EFCE" if row.get("Facturado") == "Sí" else ""
     return [color] * len(row)
+
+
+def formato_clp(valor) -> str:
+    try:
+        return "$" + f"{int(round(float(valor))):,}".replace(",", ".")
+    except Exception:
+        return "$0"
+
+
+_COLOR_PRIORIDAD = {1: "#1DB980", 2: "#0B4F86", 5: "#F2994A", 3: "#E4572E"}
+_ORDEN_DIAS = ["Lunes", "Martes", "Miercoles", "Miércoles", "Jueves", "Viernes", "Sabado", "Sábado"]
+
+
+def render_calendario(detalle: pd.DataFrame):
+    """Vista tipo calendario/kanban: una columna por dia, tarjetas por OC con
+    Pedido, OC, Monto y Pallets - igual al tablero de referencia."""
+    if detalle.empty:
+        st.info("No hay OC para mostrar en el calendario.")
+        return
+
+    dias_presentes = [d for d in _ORDEN_DIAS if d in detalle["Día"].unique()]
+    cols = st.columns(len(dias_presentes)) if dias_presentes else []
+
+    for col, dia in zip(cols, dias_presentes):
+        sub = detalle[detalle["Día"] == dia]
+        fecha = sub["Fecha"].iloc[0] if "Fecha" in sub.columns and len(sub) else None
+        fecha_str = fecha.strftime("%d-%b") if hasattr(fecha, "strftime") else ""
+        with col:
+            st.markdown(
+                f"<div style='font-weight:700;font-size:0.95rem;color:#16232E;'>{dia}</div>"
+                f"<div style='color:#6b7280;font-size:0.78rem;margin-bottom:0.4rem;'>"
+                f"{fecha_str} · {len(sub)} OC</div>",
+                unsafe_allow_html=True,
+            )
+            with st.container(height=650):
+                for ventana, sub_v in sub.groupby("Ventana"):
+                    total_pallets = sub_v["Pallets"].sum()
+                    st.markdown(
+                        f"<div style='font-size:0.68rem;font-weight:700;color:#0B4F86;"
+                        f"letter-spacing:0.03em;margin:0.5rem 0 0.35rem;'>"
+                        f"VENTANA {ventana} · {total_pallets:.1f} pal</div>",
+                        unsafe_allow_html=True,
+                    )
+                    for _, row in sub_v.sort_values("Prioridad").iterrows():
+                        color = _COLOR_PRIORIDAD.get(row["Prioridad"], "#888888")
+                        chip = (
+                            "<span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;"
+                            "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
+                            "margin-left:0.4rem;'>FACTURADO</span>"
+                        ) if row["Facturado"] == "Sí" else ""
+                        st.markdown(
+                            f"""<div style='background:#fff;border-left:4px solid {color};
+                            border-radius:6px;padding:0.5rem 0.7rem;margin-bottom:0.5rem;
+                            box-shadow:0 1px 2px rgba(0,0,0,0.06);'>
+                                <div style='font-weight:700;font-size:0.82rem;color:#16232E;'>
+                                    Pedido {row['Pedido (OC)']}{chip}
+                                </div>
+                                <div style='font-size:0.72rem;color:#6b7280;'>
+                                    OC {row['OC']}
+                                </div>
+                                <div style='display:flex;justify-content:space-between;
+                                    margin-top:0.3rem;font-size:0.76rem;'>
+                                    <span>{formato_clp(row['Monto'])}</span>
+                                    <span style='color:#0B4F86;font-weight:600;'>
+                                        {row['Pallets']:.2f} pal
+                                    </span>
+                                </div>
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
 
 
 def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
@@ -537,11 +610,19 @@ def render():
     )
 
     st.subheader("Detalle por OC (van en camión)")
-    st.caption("Las filas en verde ya aparecen como Facturadas en la tabla externa.")
-    st.dataframe(
-        detalle.style.apply(_resaltar_facturado, axis=1).format({"Pallets": "{:.2f}"}),
-        use_container_width=True, hide_index=True,
-    )
+    tab_tabla, tab_calendario = st.tabs(["📋 Tabla", "🗓️ Calendario"])
+    with tab_tabla:
+        st.caption("Las filas en verde ya aparecen como Facturadas en la tabla externa.")
+        st.dataframe(
+            detalle.style.apply(_resaltar_facturado, axis=1).format({
+                "Pallets": "{:.2f}", "Monto": lambda v: formato_clp(v),
+            }),
+            use_container_width=True, hide_index=True,
+        )
+    with tab_calendario:
+        st.caption("Una columna por día, tarjetas con Pedido, OC, Monto y Pallets — "
+                   "ordenadas por ventana y prioridad.")
+        render_calendario(detalle)
 
     if not tabla_directos.empty:
         st.subheader("Directos (información, NO ocupan camión/ventana)")
