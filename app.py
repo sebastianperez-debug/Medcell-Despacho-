@@ -408,6 +408,12 @@ def formato_clp(valor) -> str:
 
 
 _COLOR_PRIORIDAD = {1: "#1DB980", 2: "#0B4F86", 5: "#F2994A", 3: "#E4572E"}
+_LABEL_PRIORIDAD = {
+    1: "Completo (Solicitado = 1er Posible)",
+    2: "Cubierto con Pronto-vence",
+    5: "Parcial, sin cobertura",
+    3: "Sin 1er Posible (sin stock)",
+}
 _ORDEN_DIAS = ["Lunes", "Martes", "Miercoles", "Miércoles", "Jueves", "Viernes", "Sabado", "Sábado"]
 
 
@@ -419,13 +425,43 @@ def _semaforo_utilizacion(pct: float) -> str:
     return "#E4572E"      # rojo
 
 
+def render_leyenda_calendario():
+    """Leyenda de colores de las tarjetas del calendario (semaforo de prioridad
+    + chip de Facturado), para que se entienda de un vistazo que significa
+    cada color."""
+    items_html = "".join(
+        f"<div style='display:flex;align-items:center;gap:0.4rem;margin-right:1.1rem;'>"
+        f"<span style='width:10px;height:10px;border-radius:3px;background:{color};"
+        f"display:inline-block;'></span>"
+        f"<span style='font-size:0.74rem;color:#374151;'>{_LABEL_PRIORIDAD[p]}</span></div>"
+        for p, color in _COLOR_PRIORIDAD.items()
+    )
+    st.markdown(
+        f"""<div style='display:flex;flex-wrap:wrap;align-items:center;
+        background:#F5F8FC;border:1px solid #E5EAF1;border-radius:8px;
+        padding:0.55rem 0.8rem;margin-bottom:0.9rem;'>
+            <span style='font-size:0.74rem;color:#6b7280;font-weight:600;
+            margin-right:1rem;'>Colores de las tarjetas:</span>
+            {items_html}
+            <div style='display:flex;align-items:center;gap:0.4rem;'>
+                <span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;
+                font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>FACTURADO</span>
+                <span style='font-size:0.74rem;color:#374151;'>= ya despachado según el Refresh</span>
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
 def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None):
     """Vista tipo calendario/kanban: una columna por dia, con un KPI de
-    despacho arriba (camiones y utilizacion con semaforo) y tarjetas por OC
-    con Pedido, OC, Monto y Pallets."""
+    despacho arriba (camiones, utilizacion y Facturados vs No) y tarjetas por
+    OC con Pedido, OC, Monto y Pallets."""
     if detalle.empty:
         st.info("No hay OC para mostrar en el calendario.")
         return
+
+    render_leyenda_calendario()
 
     dias_presentes = [d for d in _ORDEN_DIAS if d in detalle["Día"].unique()]
     cols = st.columns(len(dias_presentes)) if dias_presentes else []
@@ -444,17 +480,35 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                 util_prom = r_dia["Utilización %"].mean()
                 color_kpi = _semaforo_utilizacion(util_prom)
 
+        # KPI Facturados vs No Facturados del dia
+        n_facturados = int((sub["Facturado"] == "Sí").sum())
+        n_no_facturados = len(sub) - n_facturados
+        pct_facturado = (n_facturados / len(sub) * 100) if len(sub) else 0
+
         with col:
             st.markdown(
                 f"<div style='font-weight:700;font-size:0.95rem;color:#16232E;'>{dia}</div>"
                 f"<div style='color:#6b7280;font-size:0.78rem;margin-bottom:0.45rem;'>"
                 f"{fecha_str} · {len(sub)} OC</div>"
                 f"<div style='background:{color_kpi}1A;border:1px solid {color_kpi};"
-                f"border-radius:8px;padding:0.4rem 0.6rem;margin-bottom:0.6rem;'>"
+                f"border-radius:8px;padding:0.4rem 0.6rem;margin-bottom:0.4rem;'>"
                 f"<div style='font-size:0.68rem;color:#374151;font-weight:600;'>"
                 f"🚚 {n_camiones_dia} camión(es)</div>"
                 f"<div style='font-size:0.68rem;color:{color_kpi};font-weight:700;'>"
                 f"{util_prom:.0f}% utilización promedio</div>"
+                f"</div>"
+                f"<div style='background:#F5F8FC;border:1px solid #E5EAF1;border-radius:8px;"
+                f"padding:0.4rem 0.6rem;margin-bottom:0.6rem;'>"
+                f"<div style='font-size:0.68rem;color:#374151;font-weight:600;"
+                f"margin-bottom:0.25rem;'>Facturados vs No</div>"
+                f"<div style='display:flex;width:100%;height:8px;border-radius:4px;"
+                f"overflow:hidden;background:#E4572E33;margin-bottom:0.25rem;'>"
+                f"<div style='width:{pct_facturado:.0f}%;background:#1DB980;'></div>"
+                f"</div>"
+                f"<div style='display:flex;justify-content:space-between;font-size:0.65rem;'>"
+                f"<span style='color:#1DB980;font-weight:700;'>✅ {n_facturados} facturadas</span>"
+                f"<span style='color:#E4572E;font-weight:700;'>⏳ {n_no_facturados} pendientes</span>"
+                f"</div>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
