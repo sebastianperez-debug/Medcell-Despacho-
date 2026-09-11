@@ -525,6 +525,64 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                         )
 
 
+def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
+    """Tabla 'Plan de camiones' en HTML (para poder pintar en verde, dentro
+    de la misma celda, los numeros de Pedido que ya estan Facturados) mas
+    una columna extra de % Facturado por camion."""
+    facturado_map = dict(zip(detalle["Pedido (OC)"].astype(str), detalle["Facturado"]))
+
+    cols_base = ["Camión #", "Día", "Fecha", "Ventana", "División",
+                 "Tipo camión (pallets)", "Pallets cargados", "Capacidad",
+                 "Utilización %"]
+    header_html = "".join(f"<th>{c}</th>" for c in cols_base) + \
+        "<th>% Facturado</th><th>Pedidos incluidos</th>"
+
+    filas_html = []
+    for _, row in resumen.iterrows():
+        pedidos = [p.strip() for p in str(row["Pedidos incluidos"]).split(",") if p.strip()]
+        n_fact = sum(1 for p in pedidos if facturado_map.get(p) == "Sí")
+        pct_fact = (n_fact / len(pedidos) * 100) if pedidos else 0
+        pedidos_html = ", ".join(
+            f"<span style='background:#C6EFCE;color:#0b3d24;font-weight:700;"
+            f"border-radius:4px;padding:0 0.3rem;'>{p}</span>"
+            if facturado_map.get(p) == "Sí" else f"<span>{p}</span>"
+            for p in pedidos
+        )
+        celdas = "".join(f"<td>{row[c]}</td>" for c in cols_base[:5])
+        celdas += (
+            f"<td style='text-align:right;'>{row['Tipo camión (pallets)']:.0f}</td>"
+            f"<td style='text-align:right;'>{row['Pallets cargados']:.0f}</td>"
+            f"<td style='text-align:right;'>{row['Capacidad']:.0f}</td>"
+            f"<td style='text-align:right;'>{row['Utilización %']:.1f}%</td>"
+            f"<td style='text-align:right;color:#1DB980;font-weight:700;'>{pct_fact:.0f}%</td>"
+            f"<td>{pedidos_html}</td>"
+        )
+        filas_html.append(f"<tr>{celdas}</tr>")
+
+    st.markdown(
+        f"""
+        <div style='overflow-x:auto;border:1px solid #E5EAF1;border-radius:8px;'>
+        <table style='border-collapse:collapse;width:100%;font-size:0.82rem;'>
+            <thead>
+                <tr style='background:#0B4F86;color:#fff;text-align:left;'>
+                    {header_html}
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(filas_html)}
+            </tbody>
+        </table>
+        </div>
+        <style>
+        table td, table th {{ padding:0.45rem 0.6rem; border-bottom:1px solid #EEF1F5; white-space:nowrap; }}
+        table tbody tr:nth-child(even) {{ background:#FAFBFD; }}
+        table td:last-child {{ white-space:normal; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
                     tabla_directos: pd.DataFrame) -> bytes:
     from openpyxl.styles import PatternFill
@@ -659,14 +717,9 @@ def render():
                   "necesarios. Suma días/ventanas o revisa las capacidades.")
 
     st.subheader("Plan de camiones")
-    st.dataframe(
-        resumen.style.format({
-            "Pallets cargados": "{:.0f}",
-            "Capacidad": "{:.0f}",
-            "Utilización %": "{:.1f}",
-        }),
-        use_container_width=True, hide_index=True,
-    )
+    st.caption("Los números de Pedido en verde ya aparecen como Facturados. "
+               "La columna % Facturado indica qué proporción de ese camión ya se despachó.")
+    render_tabla_camiones(resumen, detalle)
 
     st.subheader("Detalle por OC (van en camión)")
     tab_calendario, tab_tabla = st.tabs(["🗓️ Calendario", "📋 Tabla"])
