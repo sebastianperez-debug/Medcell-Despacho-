@@ -27,6 +27,7 @@ Supuestos configurables (todos ajustables desde la UI, no hardcodeados):
 
 import datetime
 import math
+import os
 from io import BytesIO
 
 import pandas as pd
@@ -119,14 +120,10 @@ def leer_sb(archivo) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # 1b. FACTURADOS
 # --------------------------------------------------------------------------
-# Fuente principal (automatica): pestana "OC" del MISMO Refresh que ya subes.
+# Se detecta automaticamente desde la pestana "OC" del MISMO Refresh:
 #   "Pedido de Venta" = mismo numero que "Pedido" en SB.
 #   "Pendiente" = 0 (sumado por Pedido de Venta) -> ya se despacho/facturo.
-# Fuente opcional (respaldo/override manual): archivo facturados.xlsx en el
-#   repo, o uno subido a mano en la app, por si hay algo mas reciente que
-#   todavia no refleja el Refresh.
-
-ARCHIVO_FACTURADOS_DEFAULT = "facturados.xlsx"
+# No requiere mantener ningun archivo aparte.
 
 
 @st.cache_data(show_spinner="Revisando pestaña OC del Refresh...")
@@ -155,42 +152,6 @@ def cargar_facturados_desde_refresh(archivo) -> set:
     pendiente_total = df_oc.groupby("Pedido de Venta")["Pendiente"].sum()
     ya_facturados = pendiente_total[pendiente_total <= 0].index
     return {str(int(x)) for x in ya_facturados if pd.notna(x)}
-
-
-def cargar_facturados(archivo_subido=None, ruta_local: str = ARCHIVO_FACTURADOS_DEFAULT) -> set:
-    """Devuelve el set de numeros de Pedido marcados como Facturados en el
-    archivo externo (opcional): prioriza el subido manualmente en la app;
-    si no hay, busca el archivo local (el que mantienes en el repo)."""
-    import os
-
-    df_fact = None
-    fuente = None
-    try:
-        if archivo_subido is not None:
-            fuente = archivo_subido
-        elif os.path.exists(ruta_local):
-            fuente = ruta_local
-
-        if fuente is not None:
-            nombre = getattr(fuente, "name", str(fuente))
-            if str(nombre).lower().endswith(".csv"):
-                df_fact = pd.read_csv(fuente)
-            else:
-                df_fact = pd.read_excel(fuente)
-    except Exception as e:
-        st.warning(f"No pude leer el archivo de Facturados: {e}")
-        return set()
-
-    if df_fact is None or df_fact.empty:
-        return set()
-
-    df_fact.columns = [str(c).strip() for c in df_fact.columns]
-    col_pedido = next(
-        (c for c in df_fact.columns if c.strip().lower() in
-         ("pedido", "oc", "n° pedido", "numero pedido", "número pedido")),
-        df_fact.columns[0],
-    )
-    return set(df_fact[col_pedido].dropna().astype(str).str.strip())
 
 
 # --------------------------------------------------------------------------
@@ -593,9 +554,30 @@ def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
 def render():
     _header()
 
-    archivo = st.file_uploader("Sube el Refresh (Excel)", type=["xlsx"])
-    if not archivo:
-        st.info("Sube el archivo Refresh para continuar.")
+    RUTA_REFRESH_DEFAULT = "data/Refresh.xlsx"
+
+    with st.sidebar:
+        st.markdown("### 📂 Fuente de datos")
+        archivo_subido = st.file_uploader(
+            "Reemplazar con un Excel más nuevo (opcional)", type=["xlsx"]
+        )
+        st.caption(
+            f"Si no subes nada, se usa el archivo incluido en el repositorio "
+            f"(`{RUTA_REFRESH_DEFAULT}`)."
+        )
+        if os.path.exists(RUTA_REFRESH_DEFAULT):
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(RUTA_REFRESH_DEFAULT))
+            st.caption(f"🕒 Última modificación del archivo: {mtime.strftime('%d-%m-%Y')}")
+
+    if archivo_subido is not None:
+        archivo = archivo_subido
+    elif os.path.exists(RUTA_REFRESH_DEFAULT):
+        archivo = RUTA_REFRESH_DEFAULT
+    else:
+        st.info(
+            "Sube el archivo Refresh (o deja uno guardado como "
+            f"`{RUTA_REFRESH_DEFAULT}` en el repo) para continuar."
+        )
         return
 
     df = leer_sb(archivo)
@@ -628,31 +610,11 @@ def render():
                    "2) cubierto con Pronto-vence, 5) parcial sin cobertura, 3) sin 1er Posible.")
         orden_prioridad = [1, 2, 5, 3]
 
-    with st.expander("🟩 Facturados"):
-        st.caption(
-            "Se detecta automáticamente desde la pestaña **OC** del mismo Refresh que "
-            "subiste (Pedido de Venta con Pendiente = 0 → ya despachado/facturado). "
-            "No necesitas mantener ningún archivo aparte."
-        )
-        usar_archivo_extra = st.checkbox(
-            "Agregar/forzar Facturados desde un archivo externo (opcional, por si hay "
-            "algo más reciente que el Refresh todavía no refleja)"
-        )
-        archivo_facturados = None
-        if usar_archivo_extra:
-            archivo_facturados = st.file_uploader(
-                f"Subir tabla de Facturados (Excel/CSV, columna 'Pedido') — o se usa "
-                f"`{ARCHIVO_FACTURADOS_DEFAULT}` del repo si no subes nada",
-                type=["xlsx", "csv"], key="facturados_upload",
-            )
-
-    facturados_refresh = cargar_facturados_desde_refresh(archivo)
-    facturados_extra = cargar_facturados(archivo_facturados) if usar_archivo_extra else set()
-    facturados = facturados_refresh | facturados_extra
+    facturados = cargar_facturados_desde_refresh(archivo)
     if facturados:
         st.caption(
-            f"✅ {len(facturados_refresh)} pedidos detectados como Facturados desde el "
-            f"Refresh" + (f" + {len(facturados_extra)} desde archivo externo" if facturados_extra else "") + "."
+            f"✅ {len(facturados)} pedidos detectados como Facturados desde la pestaña "
+            "OC del Refresh (automático, sin archivo aparte)."
         )
 
     if not capacidades or not dias:
