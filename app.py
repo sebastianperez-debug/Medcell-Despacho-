@@ -381,6 +381,20 @@ def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
                 if val == "Sí":
                     for c in range(1, len(detalle.columns) + 1):
                         ws.cell(row=r, column=c).fill = verde
+
+        # Formato numerico limpio (2 decimales) en vez del "general" de Excel
+        if "Pallets" in detalle.columns:
+            ws = writer.sheets["Detalle Pedidos"]
+            col_pallets = detalle.columns.get_loc("Pallets") + 1
+            for r in range(2, len(detalle) + 2):
+                ws.cell(row=r, column=col_pallets).number_format = "0.00"
+        if "Pallets cargados" in resumen.columns:
+            ws = writer.sheets["Plan Despacho"]
+            col_pallets = resumen.columns.get_loc("Pallets cargados") + 1
+            col_util = resumen.columns.get_loc("Utilización %") + 1
+            for r in range(2, len(resumen) + 2):
+                ws.cell(row=r, column=col_pallets).number_format = "0.00"
+                ws.cell(row=r, column=col_util).number_format = "0.0"
     return buf.getvalue()
 
 
@@ -468,12 +482,19 @@ def render():
                   "necesarios. Suma días/ventanas o revisa las capacidades.")
 
     st.subheader("Plan de camiones")
-    st.dataframe(resumen, use_container_width=True, hide_index=True)
+    st.dataframe(
+        resumen.style.format({
+            "Pallets cargados": "{:.2f}",
+            "Capacidad": "{:.0f}",
+            "Utilización %": "{:.1f}",
+        }),
+        use_container_width=True, hide_index=True,
+    )
 
     st.subheader("Detalle por OC (van en camión)")
     st.caption("Las filas en verde ya aparecen como Facturadas en la tabla externa.")
     st.dataframe(
-        detalle.style.apply(_resaltar_facturado, axis=1),
+        detalle.style.apply(_resaltar_facturado, axis=1).format({"Pallets": "{:.2f}"}),
         use_container_width=True, hide_index=True,
     )
 
