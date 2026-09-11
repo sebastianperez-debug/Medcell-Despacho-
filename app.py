@@ -583,6 +583,71 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
     )
 
 
+def exportar_pendientes_excel(detalle: pd.DataFrame) -> bytes | None:
+    """Excel SOLO con las OC que no alcanzaron ventana esta semana (overflow):
+    Hoja 'Resumen' = tabla pivote División (filas) x Fecha vence (columnas),
+    igual estilo a la tabla de referencia (categorías al costado, fechas
+    arriba); luego una pestaña por fecha con el detalle completo."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    pendientes = detalle[detalle["Día"] == "SIN VENTANA"].copy()
+    if pendientes.empty:
+        return None
+
+    pendientes["Fecha vence"] = pd.to_datetime(pendientes["Fecha vence"]).dt.date
+    pivote = pd.pivot_table(
+        pendientes, index="División", columns="Fecha vence",
+        values="Pedido (OC)", aggfunc="count", fill_value=0,
+    )
+    pivote["Total general"] = pivote.sum(axis=1)
+    pivote.loc["Total general"] = pivote.sum(axis=0)
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        pivote.to_excel(writer, sheet_name="Resumen", index=True)
+
+        for fecha, sub in pendientes.groupby("Fecha vence"):
+            nombre_hoja = fecha.strftime("%d-%m-%Y")[:31]
+            sub.drop(columns=["Día", "Ventana", "Fecha"], errors="ignore").to_excel(
+                writer, sheet_name=nombre_hoja, index=False
+            )
+
+        # --- Estilo hoja Resumen: encabezado azul Medcell + columna de
+        # categorias resaltada, igual estructura que la tabla de referencia.
+        ws = writer.sheets["Resumen"]
+        header_fill = PatternFill("solid", fgColor="0B4F86")
+        header_font = Font(bold=True, color="FFFFFF")
+        cat_fill = PatternFill("solid", fgColor="E7F5EC")
+        total_fill = PatternFill("solid", fgColor="EAF0F7")
+        bold = Font(bold=True)
+        thin = Side(style="thin", color="D9E2EC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        n_rows, n_cols = pivote.shape
+        for c in range(1, n_cols + 2):
+            cell = ws.cell(row=1, column=c)
+            cell.fill, cell.font = header_fill, header_font
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = border
+        for r in range(2, n_rows + 2):
+            cell = ws.cell(row=r, column=1)
+            cell.fill, cell.font = cat_fill, bold
+            cell.border = border
+            for c in range(2, n_cols + 2):
+                ws.cell(row=r, column=c).border = border
+        for c in range(1, n_cols + 2):  # fila de totales
+            cell = ws.cell(row=n_rows + 1, column=c)
+            cell.font, cell.fill = bold, total_fill
+        for r in range(1, n_rows + 2):  # columna de totales
+            cell = ws.cell(row=r, column=n_cols + 1)
+            cell.font, cell.fill = bold, total_fill
+        for col in ws.columns:
+            length = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+            ws.column_dimensions[col[0].column_letter].width = max(12, length + 2)
+
+    return buf.getvalue()
+
+
 def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
                     tabla_directos: pd.DataFrame) -> bytes:
     from openpyxl.styles import PatternFill
@@ -622,6 +687,20 @@ def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
 # --------------------------------------------------------------------------
 # 5. PAGINA DE STREAMLIT
 # --------------------------------------------------------------------------
+
+def _bytes_archivo_original(archivo) -> bytes | None:
+    """Devuelve los bytes del Refresh que se esta usando (subido a mano o el
+    data/Refresh.xlsx del repo), para poder ofrecerlo como descarga."""
+    try:
+        if hasattr(archivo, "getvalue"):
+            return archivo.getvalue()
+        if isinstance(archivo, str) and os.path.exists(archivo):
+            with open(archivo, "rb") as f:
+                return f.read()
+    except Exception:
+        pass
+    return None
+
 
 def render():
     _header()
@@ -715,6 +794,31 @@ def render():
     if info["overflow"]:
         st.error("⚠️ No alcanzan las ventanas de la semana para todos los camiones "
                   "necesarios. Suma días/ventanas o revisa las capacidades.")
+
+    excel_pendientes = exportar_pendientes_excel(detalle)
+    col_desc_a, col_desc_b = st.columns(2)
+    with col_desc_a:
+        refresh_bytes = _bytes_archivo_original(archivo)
+        if refresh_bytes:
+            st.download_button(
+                "⬇️ Descargar Refresh de origen (Excel)",
+                data=refresh_bytes,
+                file_name="Refresh.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+    with col_desc_b:
+        if excel_pendientes:
+            n_pend = int((detalle["Día"] == "SIN VENTANA").sum())
+            st.download_button(
+                f"⬇️ Descargar pendientes sin ventana (Excel) · {n_pend} OC",
+                data=excel_pendientes,
+                file_name=f"Pendientes_S{semana}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        else:
+            st.success("✅ Sin pendientes: todas las OC quedaron con ventana asignada.")
 
     st.subheader("Plan de camiones")
     st.caption("Los números de Pedido en verde ya aparecen como Facturados. "
