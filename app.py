@@ -48,6 +48,28 @@ st.set_page_config(
 
 _BRAND_CSS = """
 <style>
+/* Fuerza tema oscuro siempre, sin importar la preferencia del navegador o
+   el toggle de tema de quien abre la app (Streamlit permite claro/oscuro
+   por sesion; esto lo anula visualmente). */
+html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"],
+[data-testid="stHeader"], [data-testid="stSidebar"], [data-testid="stMain"],
+.main, .block-container {
+    background-color: #0B1120 !important;
+    color: #F5F7FA !important;
+}
+[data-testid="stSidebar"] { background-color: #0F1626 !important; }
+[data-testid="stHeader"] { background: transparent !important; }
+p, span, label, li, div, h1, h2, h3, h4, h5, h6 { color: #F5F7FA; }
+.stCaption, [data-testid="stCaptionContainer"] { color: #93A2B8 !important; }
+[data-testid="stExpander"] {
+    background-color: #141B2D !important;
+    border: 1px solid #232E45 !important;
+    border-radius: 10px !important;
+}
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+    background-color: #141B2D !important;
+}
+
 .medcell-header {
     background: linear-gradient(135deg, #0B4F86 0%, #12294A 100%);
     padding: 1.4rem 1.8rem;
@@ -86,6 +108,38 @@ _BRAND_CSS = """
     margin-left: 0.6rem;
     vertical-align: middle;
 }
+
+/* Tarjetas KPI oscuras, estilo Medcell Almacenamiento */
+.kpi-card {
+    background: #141B2D;
+    border: 1px solid #232E45;
+    border-radius: 12px;
+    padding: 1.1rem 1.2rem;
+    text-align: center;
+    min-height: 118px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+.kpi-card .kpi-value {
+    font-size: 1.9rem;
+    font-weight: 800;
+    color: #FFFFFF;
+    line-height: 1.1;
+}
+.kpi-card .kpi-label {
+    color: #93A2B8;
+    font-size: 0.82rem;
+    margin-top: 0.35rem;
+}
+.kpi-card .kpi-badge {
+    display: inline-block;
+    margin-top: 0.5rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 0.15rem 0.6rem;
+    border-radius: 999px;
+}
 </style>
 """
 
@@ -103,6 +157,29 @@ def _header():
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_kpi_cards(cards: list[dict]):
+    """Fila de tarjetas KPI oscuras. Cada card: {value, label, badge_text
+    (opcional), badge_color (opcional, hex)}."""
+    cols = st.columns(len(cards))
+    for col, card in zip(cols, cards):
+        badge_html = ""
+        if card.get("badge_text"):
+            color = card.get("badge_color", "#3B9EFF")
+            badge_html = (
+                f"<div class='kpi-badge' style='background:{color}26;"
+                f"color:{color};'>{card['badge_text']}</div>"
+            )
+        with col:
+            st.markdown(
+                f"""<div class='kpi-card'>
+                    <div class='kpi-value'>{card['value']}</div>
+                    <div class='kpi-label'>{card['label']}</div>
+                    {badge_html}
+                </div>""",
+                unsafe_allow_html=True,
+            )
 
 # --------------------------------------------------------------------------
 # 1. LECTURA DE DATOS
@@ -408,20 +485,20 @@ def render_leyenda_calendario():
         f"<div style='display:flex;align-items:center;gap:0.4rem;margin-right:1.1rem;'>"
         f"<span style='width:10px;height:10px;border-radius:3px;background:{color};"
         f"display:inline-block;'></span>"
-        f"<span style='font-size:0.74rem;color:#374151;'>{_LABEL_PRIORIDAD[p]}</span></div>"
+        f"<span style='font-size:0.74rem;color:#C7D2E0;'>{_LABEL_PRIORIDAD[p]}</span></div>"
         for p, color in _COLOR_PRIORIDAD.items()
     )
     st.markdown(
         f"""<div style='display:flex;flex-wrap:wrap;align-items:center;
-        background:#F5F8FC;border:1px solid #E5EAF1;border-radius:8px;
+        background:#141B2D;border:1px solid #232E45;border-radius:8px;
         padding:0.55rem 0.8rem;margin-bottom:0.9rem;'>
-            <span style='font-size:0.74rem;color:#6b7280;font-weight:600;
+            <span style='font-size:0.74rem;color:#8494AC;font-weight:600;
             margin-right:1rem;'>Colores de las tarjetas:</span>
             {items_html}
             <div style='display:flex;align-items:center;gap:0.4rem;'>
                 <span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;
                 font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>FACTURADO</span>
-                <span style='font-size:0.74rem;color:#374151;'>= ya despachado según el Refresh</span>
+                <span style='font-size:0.74rem;color:#C7D2E0;'>= ya despachado según el Refresh</span>
             </div>
         </div>""",
         unsafe_allow_html=True,
@@ -462,19 +539,19 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
 
         with col:
             st.markdown(
-                f"<div style='font-weight:700;font-size:0.95rem;color:#16232E;'>{dia}</div>"
-                f"<div style='color:#6b7280;font-size:0.78rem;margin-bottom:0.45rem;'>"
+                f"<div style='font-weight:700;font-size:0.95rem;color:#F5F7FA;'>{dia}</div>"
+                f"<div style='color:#8494AC;font-size:0.78rem;margin-bottom:0.45rem;'>"
                 f"{fecha_str} · {len(sub)} OC</div>"
                 f"<div style='background:{color_kpi}1A;border:1px solid {color_kpi};"
                 f"border-radius:8px;padding:0.4rem 0.6rem;margin-bottom:0.4rem;'>"
-                f"<div style='font-size:0.68rem;color:#374151;font-weight:600;'>"
+                f"<div style='font-size:0.68rem;color:#C7D2E0;font-weight:600;'>"
                 f"🚚 {n_camiones_dia} camión(es)</div>"
                 f"<div style='font-size:0.68rem;color:{color_kpi};font-weight:700;'>"
                 f"{util_prom:.0f}% utilización promedio</div>"
                 f"</div>"
-                f"<div style='background:#F5F8FC;border:1px solid #E5EAF1;border-radius:8px;"
+                f"<div style='background:#141B2D;border:1px solid #232E45;border-radius:8px;"
                 f"padding:0.4rem 0.6rem;margin-bottom:0.6rem;'>"
-                f"<div style='font-size:0.68rem;color:#374151;font-weight:600;"
+                f"<div style='font-size:0.68rem;color:#C7D2E0;font-weight:600;"
                 f"margin-bottom:0.25rem;'>Facturados vs No</div>"
                 f"<div style='display:flex;width:100%;height:8px;border-radius:4px;"
                 f"overflow:hidden;background:#E4572E33;margin-bottom:0.25rem;'>"
@@ -504,13 +581,13 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                             "margin-left:0.4rem;'>FACTURADO</span>"
                         ) if row["Facturado"] == "Sí" else ""
                         st.markdown(
-                            f"""<div style='background:#fff;border-left:4px solid {color};
+                            f"""<div style='background:#141B2D;border-left:4px solid {color};
                             border-radius:6px;padding:0.5rem 0.7rem;margin-bottom:0.5rem;
                             box-shadow:0 1px 2px rgba(0,0,0,0.06);'>
-                                <div style='font-weight:700;font-size:0.82rem;color:#16232E;'>
+                                <div style='font-weight:700;font-size:0.82rem;color:#F5F7FA;'>
                                     Pedido {row['Pedido (OC)']}{chip}
                                 </div>
-                                <div style='font-size:0.72rem;color:#6b7280;'>
+                                <div style='font-size:0.72rem;color:#8494AC;'>
                                     OC {row['OC']}
                                 </div>
                                 <div style='display:flex;justify-content:space-between;
@@ -561,7 +638,7 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
 
     st.markdown(
         f"""
-        <div style='overflow-x:auto;border:1px solid #E5EAF1;border-radius:8px;'>
+        <div style='overflow-x:auto;border:1px solid #232E45;border-radius:8px;'>
         <table style='border-collapse:collapse;width:100%;font-size:0.82rem;'>
             <thead>
                 <tr style='background:#0B4F86;color:#fff;text-align:left;'>
@@ -574,8 +651,8 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
         </table>
         </div>
         <style>
-        table td, table th {{ padding:0.45rem 0.6rem; border-bottom:1px solid #EEF1F5; white-space:nowrap; }}
-        table tbody tr:nth-child(even) {{ background:#FAFBFD; }}
+        table td, table th {{ padding:0.45rem 0.6rem; border-bottom:1px solid #232E45; white-space:nowrap; color:#F5F7FA; }}
+        table tbody tr:nth-child(even) {{ background:#0F1626; }}
         table td:last-child {{ white-space:normal; }}
         </style>
         """,
@@ -791,12 +868,18 @@ def render():
             st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
         return
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Camiones necesarios", info["camiones"])
-    c2.metric("Ventanas disponibles", info["ventanas_disponibles"])
-    c3.metric("Holgura", info["ventanas_disponibles"] - info["camiones"])
-    c4.metric("OC 100% Directos", info["oc_directos"])
-    c5.metric("OC ya Facturadas", info["oc_facturadas"])
+    holgura = info["ventanas_disponibles"] - info["camiones"]
+    render_kpi_cards([
+        {"value": info["camiones"], "label": "Camiones necesarios"},
+        {"value": info["ventanas_disponibles"], "label": "Ventanas disponibles"},
+        {
+            "value": holgura, "label": "Holgura",
+            "badge_text": "Atención" if holgura < 0 else "OK",
+            "badge_color": "#E4572E" if holgura < 0 else "#1DB980",
+        },
+        {"value": info["oc_directos"], "label": "OC 100% Directos"},
+        {"value": info["oc_facturadas"], "label": "OC ya Facturadas"},
+    ])
     if info["overflow"]:
         st.error("⚠️ No alcanzan las ventanas de la semana para todos los camiones "
                   "necesarios. Suma días/ventanas o revisa las capacidades.")
