@@ -653,6 +653,31 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
     st.markdown(tabla_html, unsafe_allow_html=True)
 
 
+def _formatear_hoja_detalle(ws, df: pd.DataFrame):
+    """Ajusta ancho de columnas al contenido, fechas cortas (dd-mm-aaaa) y
+    Monto con separador de miles, para que no salga '####' ni números pegados."""
+    from openpyxl.utils import get_column_letter
+
+    col_fecha = {c for c in df.columns if "fecha" in c.lower()}
+    col_monto = {c for c in df.columns if c.lower() == "monto"}
+
+    for idx, col in enumerate(df.columns, start=1):
+        letra = get_column_letter(idx)
+        if col in col_fecha:
+            for r in range(2, len(df) + 2):
+                ws.cell(row=r, column=idx).number_format = "dd-mm-yyyy"
+            ws.column_dimensions[letra].width = 13
+        elif col in col_monto:
+            for r in range(2, len(df) + 2):
+                ws.cell(row=r, column=idx).number_format = "#,##0"
+            ws.column_dimensions[letra].width = 14
+        else:
+            largo = max(
+                [len(str(col))] + [len(str(v)) for v in df[col].astype(str)]
+            ) if len(df) else len(str(col))
+            ws.column_dimensions[letra].width = min(max(largo + 2, 10), 45)
+
+
 def exportar_pendientes_excel(detalle: pd.DataFrame) -> bytes | None:
     """Excel SOLO con las OC que TODAVIA NO se facturan (Facturado = No, las
     filas blancas de la tabla): Hoja 'Resumen' = tabla pivote División (filas)
@@ -682,11 +707,10 @@ def exportar_pendientes_excel(detalle: pd.DataFrame) -> bytes | None:
         pivote.to_excel(writer, sheet_name="Resumen", index=True)
 
         for dia in orden_dias_cols:
-            sub = pendientes[pendientes["Día"] == dia]
+            sub = pendientes[pendientes["Día"] == dia].drop(columns=["Día"], errors="ignore")
             nombre_hoja = dia[:31]
-            sub.drop(columns=["Día"], errors="ignore").to_excel(
-                writer, sheet_name=nombre_hoja, index=False
-            )
+            sub.to_excel(writer, sheet_name=nombre_hoja, index=False)
+            _formatear_hoja_detalle(writer.sheets[nombre_hoja], sub)
 
         # --- Estilo hoja Resumen: encabezado azul Medcell + columna de
         # categorias resaltada, igual estructura que la tabla de referencia.
@@ -810,12 +834,10 @@ def render():
     df = leer_sb(archivo)
     semanas_disp = sorted(df["Semana"].dropna().unique().tolist())
 
-    with st.sidebar:
-        st.markdown("### 🔍 Filtros")
-        semana = st.radio(
-            "Semana a planificar", semanas_disp, horizontal=True,
-            index=len(semanas_disp) - 1 if semanas_disp else 0,
-        )
+    semana = st.radio(
+        "Semana a planificar", semanas_disp, horizontal=True,
+        index=len(semanas_disp) - 1 if semanas_disp else 0,
+    )
 
     # El año no se pide al usuario: se infiere de la Fecha vence de esa
     # misma semana en el Refresh (necesario solo para ubicar el Lunes ISO).
@@ -825,7 +847,8 @@ def render():
     anio = int(_fechas_semana.dt.year.mode().iloc[0]) if not _fechas_semana.empty \
         else datetime.date.today().year
 
-    with st.expander("⚙️ Configuración (ajustable)"):
+    with st.sidebar:
+        st.markdown("### ⚙️ Configuración")
         pallet_col = st.radio(
             "Columna a usar para calcular pallets por OC",
             ["Pallets Pos.", "Pallets posibles"],
