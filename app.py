@@ -116,10 +116,12 @@ p, span, label, li, div, h1, h2, h3, h4, h5, h6 { color: #F5F7FA; }
     border-radius: 12px;
     padding: 1.1rem 1.2rem;
     text-align: center;
-    min-height: 118px;
+    height: 132px;
     display: flex;
     flex-direction: column;
+    align-items: center;
     justify-content: center;
+    box-sizing: border-box;
 }
 .kpi-card .kpi-value {
     font-size: 1.9rem;
@@ -160,26 +162,26 @@ def _header():
 
 
 def render_kpi_cards(cards: list[dict]):
-    """Fila de tarjetas KPI oscuras. Cada card: {value, label, badge_text
-    (opcional), badge_color (opcional, hex)}."""
+    """Fila de tarjetas KPI oscuras, todas del mismo tamaño. Cada card:
+    {value, label, badge_text (opcional), badge_color (opcional, hex)}."""
     cols = st.columns(len(cards))
     for col, card in zip(cols, cards):
         badge_html = ""
         if card.get("badge_text"):
             color = card.get("badge_color", "#3B9EFF")
             badge_html = (
-                f"<div class='kpi-badge' style='background:{color}26;"
-                f"color:{color};'>{card['badge_text']}</div>"
+                f"<div class='kpi-badge' style='background:{color}26;color:{color};'>"
+                f"{card['badge_text']}</div>"
             )
+        html = (
+            f"<div class='kpi-card'>"
+            f"<div class='kpi-value'>{card['value']}</div>"
+            f"<div class='kpi-label'>{card['label']}</div>"
+            f"{badge_html}"
+            f"</div>"
+        )
         with col:
-            st.markdown(
-                f"""<div class='kpi-card'>
-                    <div class='kpi-value'>{card['value']}</div>
-                    <div class='kpi-label'>{card['label']}</div>
-                    {badge_html}
-                </div>""",
-                unsafe_allow_html=True,
-            )
+            st.markdown(html, unsafe_allow_html=True)
 
 # --------------------------------------------------------------------------
 # 1. LECTURA DE DATOS
@@ -448,8 +450,8 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
 
 
 def _resaltar_facturado(row):
-    color = "background-color: #C6EFCE" if row.get("Facturado") == "Sí" else ""
-    return [color] * len(row)
+    style = "background-color: #C6EFCE; color: #0b3d24" if row.get("Facturado") == "Sí" else ""
+    return [style] * len(row)
 
 
 def formato_clp(valor) -> str:
@@ -488,21 +490,21 @@ def render_leyenda_calendario():
         f"<span style='font-size:0.74rem;color:#C7D2E0;'>{_LABEL_PRIORIDAD[p]}</span></div>"
         for p, color in _COLOR_PRIORIDAD.items()
     )
-    st.markdown(
-        f"""<div style='display:flex;flex-wrap:wrap;align-items:center;
-        background:#141B2D;border:1px solid #232E45;border-radius:8px;
-        padding:0.55rem 0.8rem;margin-bottom:0.9rem;'>
-            <span style='font-size:0.74rem;color:#8494AC;font-weight:600;
-            margin-right:1rem;'>Colores de las tarjetas:</span>
-            {items_html}
-            <div style='display:flex;align-items:center;gap:0.4rem;'>
-                <span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;
-                font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>FACTURADO</span>
-                <span style='font-size:0.74rem;color:#C7D2E0;'>= ya despachado según el Refresh</span>
-            </div>
-        </div>""",
-        unsafe_allow_html=True,
+    leyenda_html = (
+        "<div style='display:flex;flex-wrap:wrap;align-items:center;"
+        "background:#141B2D;border:1px solid #232E45;border-radius:8px;"
+        "padding:0.55rem 0.8rem;margin-bottom:0.9rem;'>"
+        "<span style='font-size:0.74rem;color:#8494AC;font-weight:600;"
+        "margin-right:1rem;'>Colores de las tarjetas:</span>"
+        f"{items_html}"
+        "<div style='display:flex;align-items:center;gap:0.4rem;'>"
+        "<span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;"
+        "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>FACTURADO</span>"
+        "<span style='font-size:0.74rem;color:#C7D2E0;'>= ya despachado según el Refresh</span>"
+        "</div>"
+        "</div>"
     )
+    st.markdown(leyenda_html, unsafe_allow_html=True)
 
 
 def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None):
@@ -580,26 +582,22 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                             "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
                             "margin-left:0.4rem;'>FACTURADO</span>"
                         ) if row["Facturado"] == "Sí" else ""
-                        st.markdown(
-                            f"""<div style='background:#141B2D;border-left:4px solid {color};
-                            border-radius:6px;padding:0.5rem 0.7rem;margin-bottom:0.5rem;
-                            box-shadow:0 1px 2px rgba(0,0,0,0.06);'>
-                                <div style='font-weight:700;font-size:0.82rem;color:#F5F7FA;'>
-                                    Pedido {row['Pedido (OC)']}{chip}
-                                </div>
-                                <div style='font-size:0.72rem;color:#8494AC;'>
-                                    OC {row['OC']}
-                                </div>
-                                <div style='display:flex;justify-content:space-between;
-                                    margin-top:0.3rem;font-size:0.76rem;'>
-                                    <span>{formato_clp(row['Monto'])}</span>
-                                    <span style='color:#0B4F86;font-weight:600;'>
-                                        {row['Pallets']:.0f} pal
-                                    </span>
-                                </div>
-                            </div>""",
-                            unsafe_allow_html=True,
+                        tarjeta_html = (
+                            f"<div style='background:#141B2D;border-left:4px solid {color};"
+                            "border-radius:6px;padding:0.5rem 0.7rem;margin-bottom:0.5rem;"
+                            "box-shadow:0 1px 2px rgba(0,0,0,0.2);'>"
+                            "<div style='font-weight:700;font-size:0.82rem;color:#F5F7FA;'>"
+                            f"Pedido {row['Pedido (OC)']}{chip}"
+                            "</div>"
+                            f"<div style='font-size:0.72rem;color:#8494AC;'>OC {row['OC']}</div>"
+                            "<div style='display:flex;justify-content:space-between;"
+                            "margin-top:0.3rem;font-size:0.76rem;color:#C7D2E0;'>"
+                            f"<span>{formato_clp(row['Monto'])}</span>"
+                            f"<span style='color:#3B9EFF;font-weight:600;'>{row['Pallets']:.0f} pal</span>"
+                            "</div>"
+                            "</div>"
                         )
+                        st.markdown(tarjeta_html, unsafe_allow_html=True)
 
 
 def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
@@ -636,28 +634,23 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
         )
         filas_html.append(f"<tr>{celdas}</tr>")
 
-    st.markdown(
-        f"""
-        <div style='overflow-x:auto;border:1px solid #232E45;border-radius:8px;'>
-        <table style='border-collapse:collapse;width:100%;font-size:0.82rem;'>
-            <thead>
-                <tr style='background:#0B4F86;color:#fff;text-align:left;'>
-                    {header_html}
-                </tr>
-            </thead>
-            <tbody>
-                {''.join(filas_html)}
-            </tbody>
-        </table>
-        </div>
-        <style>
-        table td, table th {{ padding:0.45rem 0.6rem; border-bottom:1px solid #232E45; white-space:nowrap; color:#F5F7FA; }}
-        table tbody tr:nth-child(even) {{ background:#0F1626; }}
-        table td:last-child {{ white-space:normal; }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    tabla_html = (
+        "<div style='overflow-x:auto;border:1px solid #232E45;border-radius:8px;'>"
+        "<table style='border-collapse:collapse;width:100%;font-size:0.82rem;'>"
+        "<thead>"
+        f"<tr style='background:#0B4F86;color:#fff;text-align:left;'>{header_html}</tr>"
+        "</thead>"
+        f"<tbody>{''.join(filas_html)}</tbody>"
+        "</table>"
+        "</div>"
+        "<style>"
+        "table td, table th { padding:0.45rem 0.6rem; border-bottom:1px solid #232E45; "
+        "white-space:nowrap; color:#F5F7FA; }"
+        "table tbody tr:nth-child(even) { background:#0F1626; }"
+        "table td:last-child { white-space:normal; }"
+        "</style>"
     )
+    st.markdown(tabla_html, unsafe_allow_html=True)
 
 
 def exportar_pendientes_excel(detalle: pd.DataFrame) -> bytes | None:
