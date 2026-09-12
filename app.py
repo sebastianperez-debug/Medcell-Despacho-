@@ -569,12 +569,21 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
             with st.container(height=600):
                 for ventana, sub_v in sub.groupby("Ventana"):
                     total_pallets = sub_v["Pallets"].sum()
-                    st.markdown(
-                        f"<div style='font-size:0.68rem;font-weight:700;color:#0B4F86;"
-                        f"letter-spacing:0.03em;margin:0.5rem 0 0.35rem;'>"
-                        f"VENTANA {ventana} · {total_pallets:.0f} pal</div>",
-                        unsafe_allow_html=True,
+                    division_v = sub_v["División"].iloc[0] if "División" in sub_v.columns else ""
+                    div_color = "#C084FC" if division_v == "FARMA" else "#FBBF24"
+                    div_icono = "🧪" if division_v == "FARMA" else "🛒"
+                    div_badge = (
+                        f"<span style='background:{div_color}26;color:{div_color};"
+                        f"font-size:0.62rem;font-weight:700;padding:0.1rem 0.5rem;"
+                        f"border-radius:999px;margin-left:0.5rem;'>{div_icono} {division_v}</span>"
+                    ) if division_v else ""
+                    ventana_html = (
+                        "<div style='font-size:0.68rem;font-weight:700;color:#0B4F86;"
+                        "letter-spacing:0.03em;margin:0.5rem 0 0.35rem;'>"
+                        f"VENTANA {ventana} · {total_pallets:.0f} pal{div_badge}"
+                        "</div>"
                     )
+                    st.markdown(ventana_html, unsafe_allow_html=True)
                     for _, row in sub_v.sort_values("Prioridad").iterrows():
                         color = _COLOR_PRIORIDAD.get(row["Prioridad"], "#888888")
                         chip = (
