@@ -810,12 +810,20 @@ def render():
     df = leer_sb(archivo)
     semanas_disp = sorted(df["Semana"].dropna().unique().tolist())
 
-    col1, col2 = st.columns(2)
-    with col1:
-        semana = st.selectbox("Semana a planificar", semanas_disp,
-                               index=len(semanas_disp) - 1 if semanas_disp else 0)
-    with col2:
-        anio = st.number_input("Año", value=datetime.date.today().year, step=1)
+    with st.sidebar:
+        st.markdown("### 🔍 Filtros")
+        semana = st.radio(
+            "Semana a planificar", semanas_disp, horizontal=True,
+            index=len(semanas_disp) - 1 if semanas_disp else 0,
+        )
+
+    # El año no se pide al usuario: se infiere de la Fecha vence de esa
+    # misma semana en el Refresh (necesario solo para ubicar el Lunes ISO).
+    _fechas_semana = pd.to_datetime(
+        df.loc[df["Semana"] == semana, "Fecha vence"], errors="coerce"
+    ).dropna()
+    anio = int(_fechas_semana.dt.year.mode().iloc[0]) if not _fechas_semana.empty \
+        else datetime.date.today().year
 
     with st.expander("⚙️ Configuración (ajustable)"):
         pallet_col = st.radio(
@@ -902,11 +910,6 @@ def render():
         else:
             st.success("✅ Todas las OC de esta semana ya aparecen como Facturadas.")
 
-    st.subheader("Plan de camiones")
-    st.caption("Los números de Pedido en verde ya aparecen como Facturados. "
-               "La columna % Facturado indica qué proporción de ese camión ya se despachó.")
-    render_tabla_camiones(resumen, detalle)
-
     st.subheader("Detalle por OC (van en camión)")
     tab_calendario, tab_tabla = st.tabs(["🗓️ Calendario", "📋 Tabla"])
     with tab_calendario:
@@ -921,6 +924,11 @@ def render():
             }),
             use_container_width=True, hide_index=True,
         )
+
+    st.subheader("Plan de camiones")
+    st.caption("Los números de Pedido en verde ya aparecen como Facturados. "
+               "La columna % Facturado indica qué proporción de ese camión ya se despachó.")
+    render_tabla_camiones(resumen, detalle)
 
     if not tabla_directos.empty:
         st.subheader("Directos (información, NO ocupan camión/ventana)")
