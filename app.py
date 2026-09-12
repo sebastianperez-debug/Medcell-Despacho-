@@ -572,15 +572,20 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                     division_v = sub_v["División"].iloc[0] if "División" in sub_v.columns else ""
                     div_color = "#C084FC" if division_v == "FARMA" else "#FBBF24"
                     div_icono = "🧪" if division_v == "FARMA" else "🛒"
+                    div_label = "FARMA" if division_v == "FARMA" else "CONSUMO"
                     div_badge = (
                         f"<span style='background:{div_color}26;color:{div_color};"
-                        f"font-size:0.62rem;font-weight:700;padding:0.1rem 0.5rem;"
-                        f"border-radius:999px;margin-left:0.5rem;'>{div_icono} {division_v}</span>"
+                        "font-size:0.6rem;font-weight:700;padding:0.1rem 0.5rem;"
+                        "border-radius:999px;white-space:nowrap;display:inline-block;"
+                        f"margin-top:0.25rem;'>{div_icono} {div_label}</span>"
                     ) if division_v else ""
                     ventana_html = (
+                        "<div style='margin:0.5rem 0 0.35rem;'>"
                         "<div style='font-size:0.68rem;font-weight:700;color:#0B4F86;"
-                        "letter-spacing:0.03em;margin:0.5rem 0 0.35rem;'>"
-                        f"VENTANA {ventana} · {total_pallets:.0f} pal{div_badge}"
+                        "letter-spacing:0.03em;'>"
+                        f"VENTANA {ventana} · {total_pallets:.0f} pal"
+                        "</div>"
+                        f"{div_badge}"
                         "</div>"
                     )
                     st.markdown(ventana_html, unsafe_allow_html=True)
