@@ -225,6 +225,7 @@ HOJAS_CONFIG = {
         "capacidades_opciones": [13, 16], "capacidades_default": [13, 16],
         "dias_opciones": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"],
         "dias_default": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes"],
+        "usa_transportes": False, "n_transportes": None,
     },
     "PU": {
         "hoja": "PU", "semana": "Sem", "oc": "OC", "pedido": "Pedido",
@@ -240,6 +241,9 @@ HOJAS_CONFIG = {
         "capacidades_opciones": [13, 16, 27], "capacidades_default": [13, 16, 27],
         "dias_opciones": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"],
         "dias_default": ["Viernes"],
+        # No hay "ventanas" fijas: son 3 transportes que hacen las vueltas
+        # que hagan falta hasta completar todo el despacho de ese dia.
+        "usa_transportes": True, "n_transportes": 3,
     },
 }
 
@@ -443,17 +447,39 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
 
 
 def asignar_ventanas(bins: list[dict], semana: int, anio: int,
-                      dias: list[str], ventanas_por_dia: int):
+                      dias: list[str], ventanas_por_dia: int,
+                      usa_transportes: bool = False, n_transportes: int = 3):
+    """Genera los "slots" (dia + ventana) donde se ubica cada camion.
+
+    Modo normal (SB): dias x ventanas_por_dia es un tope fijo; si sobran
+    camiones, quedan "SIN VENTANA" (overflow).
+
+    Modo transportes (PU): no hay tope de ventanas por dia. Los camiones se
+    reparten ciclicamente entre n_transportes hasta completar TODO el
+    despacho ese dia (nunca hay overflow, cada transporte hace las vueltas
+    que se necesiten)."""
     lunes = datetime.date.fromisocalendar(anio, semana, 1)
     dia_offset = {"Lunes": 0, "Martes": 1, "Miercoles": 2, "Miércoles": 2,
                   "Jueves": 3, "Viernes": 4, "Sabado": 5, "Sábado": 5, "Domingo": 6}
-    slots = []
-    for d in dias:
-        fecha = lunes + datetime.timedelta(days=dia_offset.get(d, 0))
-        for v in range(1, ventanas_por_dia + 1):
-            slots.append({"dia": d, "fecha": fecha, "ventana": v})
 
-    overflow = len(bins) > len(slots)
+    if usa_transportes:
+        pares_dia_transporte = [
+            (d, t) for d in dias for t in range(1, n_transportes + 1)
+        ]
+        slots = []
+        for i in range(len(bins)):
+            d, t = pares_dia_transporte[i % len(pares_dia_transporte)]
+            fecha = lunes + datetime.timedelta(days=dia_offset.get(d, 0))
+            slots.append({"dia": d, "fecha": fecha, "ventana": f"Transporte {t}"})
+        overflow = False
+    else:
+        slots = []
+        for d in dias:
+            fecha = lunes + datetime.timedelta(days=dia_offset.get(d, 0))
+            for v in range(1, ventanas_por_dia + 1):
+                slots.append({"dia": d, "fecha": fecha, "ventana": v})
+        overflow = len(bins) > len(slots)
+
     for i, b in enumerate(bins):
         slot = slots[i] if i < len(slots) else {"dia": "SIN VENTANA", "fecha": None, "ventana": "-"}
         b.update(slot)
@@ -483,7 +509,11 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
         return None, None, None, tabla_directos
 
     bins = armar_camiones(agg, capacidades, orden_prioridad)
-    bins, slots, overflow = asignar_ventanas(bins, semana, anio, dias, ventanas_por_dia)
+    bins, slots, overflow = asignar_ventanas(
+        bins, semana, anio, dias, ventanas_por_dia,
+        usa_transportes=cfg.get("usa_transportes", False),
+        n_transportes=cfg.get("n_transportes", 3),
+    )
 
     resumen = pd.DataFrame([{
         "Camión #": b["camion_num"], "Día": b["dia"], "Fecha": b["fecha"],
@@ -1849,11 +1879,23 @@ def render_plan_hoja(archivo, cfg: dict):
             cfg["dias_opciones"], default=cfg["dias_default"],
             key=f"dias_{key_ns}",
         )
-        ventanas_por_dia = st.number_input("Ventanas de despacho por día", value=4, min_value=1,
-                                            key=f"ventanas_{key_ns}")
+        if cfg.get("usa_transportes"):
+            n_transportes = st.number_input(
+                "Transportes disponibles", value=cfg.get("n_transportes", 3), min_value=1,
+                help="No hay ventanas fijas: cada transporte hace las vueltas que "
+                     "hagan falta hasta completar todo el despacho de ese día.",
+                key=f"transportes_{key_ns}",
+            )
+            ventanas_por_dia = 1  # no se usa en modo transportes, pero debe existir
+            cfg = {**cfg, "n_transportes": int(n_transportes)}
+        else:
+            ventanas_por_dia = st.number_input("Ventanas de despacho por día", value=4, min_value=1,
+                                                key=f"ventanas_{key_ns}")
         if cfg["hoja"] == "PU":
             st.caption("📌 PU no se distribuye durante la semana: por defecto solo se "
-                       "despacha el Viernes (ajustable arriba). Incluye rampla de 27 pallets.")
+                       "despacha el Viernes (ajustable arriba). Incluye rampla de 27 pallets. "
+                       "No hay tope de ventanas: se reparte entre los transportes hasta "
+                       "completar el despacho.")
         if cfg["usa_pronto_vence"]:
             st.caption(
                 "Los productos con nombre en 'Directos' se sacan ANTES de armar los "
@@ -1896,18 +1938,31 @@ def render_plan_hoja(archivo, cfg: dict):
             st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
         return
 
-    holgura = info["ventanas_disponibles"] - info["camiones"]
-    render_kpi_cards([
-        {"value": info["camiones"], "label": "Camiones necesarios"},
-        {"value": info["ventanas_disponibles"], "label": "Ventanas disponibles"},
-        {
-            "value": holgura, "label": "Holgura",
-            "badge_text": "Atención" if holgura < 0 else "OK",
-            "badge_color": "#E4572E" if holgura < 0 else "#1DB980",
-        },
-        {"value": info["oc_directos"], "label": "OC 100% Directos"},
-        {"value": info["oc_facturadas"], "label": "OC ya Facturadas"},
-    ])
+    if cfg.get("usa_transportes"):
+        n_transportes_usados = min(info["camiones"], cfg.get("n_transportes", 3))
+        render_kpi_cards([
+            {"value": info["camiones"], "label": "Camiones / viajes necesarios"},
+            {"value": cfg.get("n_transportes", 3), "label": "Transportes disponibles"},
+            {
+                "value": f"{n_transportes_usados}", "label": "Transportes en uso",
+                "badge_text": "Sin tope de ventanas", "badge_color": "#1DB980",
+            },
+            {"value": info["oc_directos"], "label": "OC 100% Directos"},
+            {"value": info["oc_facturadas"], "label": "OC ya Facturadas"},
+        ])
+    else:
+        holgura = info["ventanas_disponibles"] - info["camiones"]
+        render_kpi_cards([
+            {"value": info["camiones"], "label": "Camiones necesarios"},
+            {"value": info["ventanas_disponibles"], "label": "Ventanas disponibles"},
+            {
+                "value": holgura, "label": "Holgura",
+                "badge_text": "Atención" if holgura < 0 else "OK",
+                "badge_color": "#E4572E" if holgura < 0 else "#1DB980",
+            },
+            {"value": info["oc_directos"], "label": "OC 100% Directos"},
+            {"value": info["oc_facturadas"], "label": "OC ya Facturadas"},
+        ])
     if info["overflow"]:
         st.error("⚠️ No alcanzan las ventanas de la semana para todos los camiones "
                   "necesarios. Suma días/ventanas o revisa las capacidades.")
