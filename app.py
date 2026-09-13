@@ -222,6 +222,9 @@ HOJAS_CONFIG = {
         "sku": "SKU SB", "pallets_pos": "Pallets Pos.",
         "pallets_alt": "Pallets posibles", "usa_pronto_vence": True,
         "orden_prioridad": [1, 2, 5, 3],
+        "capacidades_opciones": [13, 16], "capacidades_default": [13, 16],
+        "dias_opciones": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"],
+        "dias_default": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes"],
     },
     "PU": {
         "hoja": "PU", "semana": "Sem", "oc": "OC", "pedido": "Pedido",
@@ -232,6 +235,11 @@ HOJAS_CONFIG = {
         "sku": "Codigo PU", "pallets_pos": "Pallets Pos.",
         "pallets_alt": None, "usa_pronto_vence": False,
         "orden_prioridad": [1, 2, 3],
+        # PU no se distribuye en la semana: solo se despacha el Viernes,
+        # y ademas de camiones de 13/16 puede usar rampla de 27 pallets.
+        "capacidades_opciones": [13, 16, 27], "capacidades_default": [13, 16, 27],
+        "dias_opciones": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"],
+        "dias_default": ["Viernes"],
     },
 }
 
@@ -1831,14 +1839,21 @@ def render_plan_hoja(archivo, cfg: dict):
                     if cfg["pallets_alt"] else ""),
             key=f"pallet_col_{key_ns}",
         )
-        capacidades = st.multiselect("Capacidades de camión disponibles (pallets)",
-                                      [13, 16], default=[13, 16], key=f"capacidades_{key_ns}")
-        dias = st.multiselect("Días hábiles de despacho",
-                               ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"],
-                               default=["Lunes", "Martes", "Miercoles", "Jueves", "Viernes"],
-                               key=f"dias_{key_ns}")
+        capacidades = st.multiselect(
+            "Capacidades de camión disponibles (pallets)",
+            cfg["capacidades_opciones"], default=cfg["capacidades_default"],
+            key=f"capacidades_{key_ns}",
+        )
+        dias = st.multiselect(
+            "Días hábiles de despacho",
+            cfg["dias_opciones"], default=cfg["dias_default"],
+            key=f"dias_{key_ns}",
+        )
         ventanas_por_dia = st.number_input("Ventanas de despacho por día", value=4, min_value=1,
                                             key=f"ventanas_{key_ns}")
+        if cfg["hoja"] == "PU":
+            st.caption("📌 PU no se distribuye durante la semana: por defecto solo se "
+                       "despacha el Viernes (ajustable arriba). Incluye rampla de 27 pallets.")
         if cfg["usa_pronto_vence"]:
             st.caption(
                 "Los productos con nombre en 'Directos' se sacan ANTES de armar los "
