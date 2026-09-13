@@ -276,9 +276,10 @@ def leer_hoja(archivo, nombre_hoja: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Revisando pestaña OC del Refresh...")
 def cargar_facturados_desde_refresh(archivo) -> set:
-    """Detecta automaticamente los Pedido ya 100% despachados/facturados
-    usando la pestana 'OC' del mismo Refresh (columnas 'Pedido de Venta' y
-    'Pendiente')."""
+    """Detecta automaticamente los Pedido con AL MENOS UNA linea/SKU ya
+    despachada, usando la pestana 'OC' del mismo Refresh (columnas
+    'Pedido de Venta' y 'Despacho'). Con que se haya despachado 1 sola linea
+    del pedido, el pedido completo se marca como Facturado."""
     try:
         archivo.seek(0)
     except Exception:
@@ -294,11 +295,11 @@ def cargar_facturados_desde_refresh(archivo) -> set:
             pass
 
     df_oc.columns = [str(c).strip() for c in df_oc.columns]
-    if "Pedido de Venta" not in df_oc.columns or "Pendiente" not in df_oc.columns:
+    if "Pedido de Venta" not in df_oc.columns or "Despacho" not in df_oc.columns:
         return set()
 
-    pendiente_total = df_oc.groupby("Pedido de Venta")["Pendiente"].sum()
-    ya_facturados = pendiente_total[pendiente_total <= 0].index
+    despacho_total = df_oc.groupby("Pedido de Venta")["Despacho"].sum()
+    ya_facturados = despacho_total[despacho_total > 0].index
     return {str(int(x)) for x in ya_facturados if pd.notna(x)}
 
 
