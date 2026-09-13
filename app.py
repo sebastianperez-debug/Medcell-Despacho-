@@ -209,17 +209,45 @@ def render_kpi_cards(cards: list[dict]):
 # La fila 4 del Excel (indice 3, 0-based) trae los encabezados reales.
 HEADER_ROW = 3
 
-COLS_NECESARIAS = [
-    "Semana", "OC", "Pedido", "Fecha vence", "Descripción",
-    "Solicitado", "1 Posible", "Pronto-vence",
-    "Pallets Pos.", "Pallets posibles", "Directos",
-]
+# Configuracion por hoja: nombres de columna y reglas de clasificacion.
+# SB usa la regla completa (incluye cobertura por Pronto-vence). PU NO puede
+# cubrir faltantes con stock por vencer, asi que esa regla se omite ahi.
+HOJAS_CONFIG = {
+    "SB": {
+        "hoja": "SB", "semana": "Semana", "oc": "OC", "pedido": "Pedido",
+        "fecha_vence": "Fecha vence", "solicitado": "Solicitado",
+        "posible1": "1 Posible", "pronto_vence": "Pronto-vence",
+        "solicitado_dolar": "Solicitado $", "directos": "Directos",
+        "division": "Division", "descripcion": "Descripción",
+        "sku": "SKU SB", "pallets_pos": "Pallets Pos.",
+        "pallets_alt": "Pallets posibles", "usa_pronto_vence": True,
+        "orden_prioridad": [1, 2, 5, 3],
+    },
+    "PU": {
+        "hoja": "PU", "semana": "Sem", "oc": "OC", "pedido": "Pedido",
+        "fecha_vence": "Fecha vence", "solicitado": "Solicitado",
+        "posible1": "1er posible", "pronto_vence": None,
+        "solicitado_dolar": "Solicitado $", "directos": "Directos",
+        "division": "División", "descripcion": "Descripción",
+        "sku": "Codigo PU", "pallets_pos": "Pallets Pos.",
+        "pallets_alt": None, "usa_pronto_vence": False,
+        "orden_prioridad": [1, 2, 3],
+    },
+}
 
 
-@st.cache_data(show_spinner="Leyendo pestaña SB...")
-def leer_sb(archivo) -> pd.DataFrame:
-    """Lee la pestaña SB del Refresh y devuelve un DataFrame limpio."""
-    df = pd.read_excel(archivo, sheet_name="SB", header=HEADER_ROW)
+@st.cache_data(show_spinner="Leyendo pestaña del Refresh...")
+def leer_hoja(archivo, nombre_hoja: str) -> pd.DataFrame:
+    """Lee una pestaña del Refresh (SB o PU) y devuelve un DataFrame limpio."""
+    try:
+        archivo.seek(0)
+    except Exception:
+        pass
+    df = pd.read_excel(archivo, sheet_name=nombre_hoja, header=HEADER_ROW)
+    try:
+        archivo.seek(0)
+    except Exception:
+        pass
     # Normaliza nombres de columnas (a veces vienen con espacios extra)
     df.columns = [str(c).strip() for c in df.columns]
     return df
@@ -229,9 +257,9 @@ def leer_sb(archivo) -> pd.DataFrame:
 # 1b. FACTURADOS
 # --------------------------------------------------------------------------
 # Se detecta automaticamente desde la pestana "OC" del MISMO Refresh:
-#   "Pedido de Venta" = mismo numero que "Pedido" en SB.
+#   "Pedido de Venta" = mismo numero que "Pedido" en SB/PU.
 #   "Pendiente" = 0 (sumado por Pedido de Venta) -> ya se despacho/facturo.
-# No requiere mantener ningun archivo aparte.
+# No requiere mantener ningun archivo aparte. Sirve para ambas pestañas.
 
 
 @st.cache_data(show_spinner="Revisando pestaña OC del Refresh...")
@@ -266,25 +294,29 @@ def cargar_facturados_desde_refresh(archivo) -> set:
 # 2. CLASIFICACION DE PRIORIDAD POR OC
 # --------------------------------------------------------------------------
 
-def _clasificar(row) -> tuple[int, str]:
+def _clasificar(row, usa_pronto_vence: bool) -> tuple[int, str]:
     # Los Directos ya fueron separados antes de llegar aca: aqui solo quedan
     # las lineas que SI van por camion.
-    sol, pos1, pv = row["sol"], row["pos1"], row["pv"]
+    sol, pos1 = row["sol"], row["pos1"]
     if pos1 == sol:
         return 1, "1 - Solicitado = 1er Posible (completo)"
-    if (sol - pos1) <= pv:
+    if usa_pronto_vence and (sol - pos1) <= row["pv"]:
         return 2, "2 - Diferencia cubierta por Pronto-vence"
     if pos1 == 0:
         return 3, "3 - Sin 1er Posible (sin stock disponible)"
-    return 5, "5 - Otros / parcial sin cobertura"
+    if usa_pronto_vence:
+        return 5, "5 - Otros / parcial sin cobertura"
+    # PU: el stock por vencer no se puede usar para completar faltantes,
+    # asi que todo lo que no es completo ni cero queda como "parcial".
+    return 2, "2 - No alcanza a completar el solicitado (parcial)"
 
 
-def separar_directos(df: pd.DataFrame, semana: int, pallet_col: str):
+def separar_directos(df: pd.DataFrame, semana: int, cfg: dict):
     """Separa las lineas con nombre en 'Directos' ANTES de armar camiones:
     esas lineas no ocupan espacio en ningun camion, solo se listan como info.
     Devuelve (df_camion, df_directos_info)."""
-    d = df[df["Semana"] == semana].copy()
-    d["directos_flag"] = d["Directos"].apply(
+    d = df[df[cfg["semana"]] == semana].copy()
+    d["directos_flag"] = d[cfg["directos"]].apply(
         lambda x: str(x).strip() not in ("", "-", "nan", "None")
     )
     df_directos = d[d["directos_flag"]].copy()
@@ -292,44 +324,50 @@ def separar_directos(df: pd.DataFrame, semana: int, pallet_col: str):
     return df_camion, df_directos
 
 
-def resumen_directos(df_directos: pd.DataFrame) -> pd.DataFrame:
+def resumen_directos(df_directos: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """Tabla informativa de lineas Directas (no van en camion)."""
     if df_directos.empty:
         return df_directos
-    cols = ["Pedido", "OC", "Fecha vence", "SKU SB", "Descripción",
-            "Directos", "Solicitado"]
+    cols = [cfg["pedido"], cfg["oc"], cfg["fecha_vence"], cfg["sku"],
+            cfg["descripcion"], cfg["directos"], cfg["solicitado"]]
     cols = [c for c in cols if c in df_directos.columns]
-    return df_directos[cols].rename(columns={"Directos": "Proveedor directo"})
+    return df_directos[cols].rename(columns={cfg["directos"]: "Proveedor directo"})
 
 
-def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str) -> pd.DataFrame:
+def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str, cfg: dict) -> pd.DataFrame:
     """Agrupa por Pedido (=OC) SOLO las lineas que van por camion (sin Directos)
     y clasifica prioridad."""
     if df_camion.empty:
         return df_camion
 
-    agg = df_camion.groupby("Pedido").agg(
-        oc=("OC", "first"),
-        fecha_vence=("Fecha vence", "first"),
-        division=("Division", "first"),
-        sol=("Solicitado", "sum"),
-        pos1=("1 Posible", "sum"),
-        pv=("Pronto-vence", "sum"),
+    agg_kwargs = dict(
+        oc=(cfg["oc"], "first"),
+        fecha_vence=(cfg["fecha_vence"], "first"),
+        division=(cfg["division"], "first"),
+        sol=(cfg["solicitado"], "sum"),
+        pos1=(cfg["posible1"], "sum"),
         pallets=(pallet_col, "sum"),
         # "Posible actual $" se pone en $0 apenas la OC queda 100% despachada
         # (ya no hay nada "posible" pendiente), asi que para reflejar el
         # valor real de la OC (y cuanto se despacho de verdad) usamos
         # "Solicitado $", que no se resetea a 0.
-        monto=("Solicitado $", "sum"),
-        n_sku=("Pedido", "count"),
-    ).reset_index()
+        monto=(cfg["solicitado_dolar"], "sum"),
+        n_sku=(cfg["pedido"], "count"),
+    )
+    if cfg["usa_pronto_vence"] and cfg["pronto_vence"] in df_camion.columns:
+        agg_kwargs["pv"] = (cfg["pronto_vence"], "sum")
 
-    pr = agg.apply(_clasificar, axis=1, result_type="expand")
+    agg = df_camion.groupby(cfg["pedido"]).agg(**agg_kwargs).reset_index()
+    if "pv" not in agg.columns:
+        agg["pv"] = 0
+
+    pr = agg.apply(lambda r: _clasificar(r, cfg["usa_pronto_vence"]), axis=1, result_type="expand")
     agg["prioridad"], agg["prioridad_label"] = pr[0], pr[1]
     # Los pallets de una OC siempre se redondean HACIA ARRIBA (nunca decimales):
     # una OC que ocupa 5.4 o 5.6 reserva igual 6 posiciones de pallet.
     agg["pallets"] = agg["pallets"].apply(lambda v: math.ceil(round(v, 6)))
     agg["monto"] = agg["monto"].round(0)
+    agg = agg.rename(columns={cfg["pedido"]: "Pedido"})
     # OC con 0 pallets (linea unica que quedo en 0 tras excluir directos) no
     # necesita camion; se deja fuera del bin-packing.
     agg = agg[agg["pallets"] > 0].reset_index(drop=True)
@@ -426,11 +464,13 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
 
 def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
                   capacidades: list[int], dias: list[str], ventanas_por_dia: int,
-                  orden_prioridad: list[int], facturados: set | None = None):
+                  orden_prioridad: list[int], facturados: set | None = None,
+                  cfg: dict | None = None):
+    cfg = cfg or HOJAS_CONFIG["SB"]
     facturados = facturados or set()
-    df_camion, df_directos = separar_directos(df, semana, pallet_col)
-    tabla_directos = resumen_directos(df_directos)
-    agg = agrupar_por_oc(df_camion, pallet_col)
+    df_camion, df_directos = separar_directos(df, semana, cfg)
+    tabla_directos = resumen_directos(df_directos, cfg)
+    agg = agrupar_por_oc(df_camion, pallet_col, cfg)
     if agg.empty:
         return None, None, None, tabla_directos
 
@@ -1756,6 +1796,169 @@ def render_stock(df_stock_raw, key_ns: str = "stock", titulo: str = "📦 Dashbo
 
 
 
+def render_plan_hoja(archivo, cfg: dict):
+    """Cuerpo completo del plan de despacho (KPIs, camiones, calendario,
+    tabla, exportables) para UNA hoja del Refresh (SB o PU). key_ns evita que
+    los widgets de ambas pestañas choquen entre si."""
+    key_ns = cfg["hoja"].lower()
+
+    df = leer_hoja(archivo, cfg["hoja"])
+    semanas_disp = sorted(df[cfg["semana"]].dropna().unique().tolist())
+
+    semana = st.radio(
+        "Semana a planificar", semanas_disp, horizontal=True,
+        index=len(semanas_disp) - 1 if semanas_disp else 0,
+        key=f"semana_{key_ns}",
+    )
+
+    # El año no se pide al usuario: se infiere de la Fecha vence de esa
+    # misma semana en el Refresh (necesario solo para ubicar el Lunes ISO).
+    _fechas_semana = pd.to_datetime(
+        df.loc[df[cfg["semana"]] == semana, cfg["fecha_vence"]], errors="coerce"
+    ).dropna()
+    anio = int(_fechas_semana.dt.year.mode().iloc[0]) if not _fechas_semana.empty \
+        else datetime.date.today().year
+
+    opciones_pallets = [cfg["pallets_pos"]] + ([cfg["pallets_alt"]] if cfg["pallets_alt"] else [])
+
+    with st.sidebar:
+        st.markdown(f"### ⚙️ Configuración — {cfg['hoja']}")
+        pallet_col = st.radio(
+            "Columna a usar para calcular pallets por OC",
+            opciones_pallets,
+            help="'Pallets Pos.' viene acotada (0.3/1)."
+                 + (" 'Pallets posibles' es la fracción real sin redondear."
+                    if cfg["pallets_alt"] else ""),
+            key=f"pallet_col_{key_ns}",
+        )
+        capacidades = st.multiselect("Capacidades de camión disponibles (pallets)",
+                                      [13, 16], default=[13, 16], key=f"capacidades_{key_ns}")
+        dias = st.multiselect("Días hábiles de despacho",
+                               ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"],
+                               default=["Lunes", "Martes", "Miercoles", "Jueves", "Viernes"],
+                               key=f"dias_{key_ns}")
+        ventanas_por_dia = st.number_input("Ventanas de despacho por día", value=4, min_value=1,
+                                            key=f"ventanas_{key_ns}")
+        if cfg["usa_pronto_vence"]:
+            st.caption(
+                "Los productos con nombre en 'Directos' se sacan ANTES de armar los "
+                "camiones (no ocupan pallets/ventanas) y quedan solo como información. "
+                "Farma y Consumo Masivo nunca comparten camión. "
+                "Orden de carga del resto: 1) Solicitado=1er Posible, "
+                "2) cubierto con Pronto-vence, 5) parcial sin cobertura, 3) sin 1er Posible."
+            )
+        else:
+            st.caption(
+                "Los productos con nombre en 'Directos' se sacan ANTES de armar los "
+                "camiones (no ocupan pallets/ventanas) y quedan solo como información. "
+                f"En {cfg['hoja']} el stock por vencer NO se usa para completar faltantes. "
+                "Orden de carga: 1) Solicitado=1er Posible (completo), "
+                "2) no alcanza a completar el solicitado (parcial), 3) sin 1er Posible."
+            )
+        orden_prioridad = cfg["orden_prioridad"]
+
+    facturados = cargar_facturados_desde_refresh(archivo)
+    if facturados:
+        st.caption(
+            f"✅ {len(facturados)} pedidos detectados como Facturados desde la pestaña "
+            "OC del Refresh (automático, sin archivo aparte)."
+        )
+
+    if not capacidades or not dias:
+        st.warning("Elige al menos una capacidad de camión y un día hábil.")
+        return
+
+    resumen, detalle, info, tabla_directos = generar_plan(
+        df, semana, int(anio), pallet_col, capacidades, dias,
+        int(ventanas_por_dia), orden_prioridad, facturados, cfg,
+    )
+
+    if resumen is None:
+        st.warning(f"No hay OC para camión en la semana {semana} "
+                    f"(revisa si todas quedaron como Directos).")
+        if not tabla_directos.empty:
+            st.subheader("Directos (información, no van en camión)")
+            st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
+        return
+
+    holgura = info["ventanas_disponibles"] - info["camiones"]
+    render_kpi_cards([
+        {"value": info["camiones"], "label": "Camiones necesarios"},
+        {"value": info["ventanas_disponibles"], "label": "Ventanas disponibles"},
+        {
+            "value": holgura, "label": "Holgura",
+            "badge_text": "Atención" if holgura < 0 else "OK",
+            "badge_color": "#E4572E" if holgura < 0 else "#1DB980",
+        },
+        {"value": info["oc_directos"], "label": "OC 100% Directos"},
+        {"value": info["oc_facturadas"], "label": "OC ya Facturadas"},
+    ])
+    if info["overflow"]:
+        st.error("⚠️ No alcanzan las ventanas de la semana para todos los camiones "
+                  "necesarios. Suma días/ventanas o revisa las capacidades.")
+
+    excel_pendientes = exportar_pendientes_excel(detalle)
+    col_desc_a, col_desc_b = st.columns(2)
+    with col_desc_a:
+        refresh_bytes = _bytes_archivo_original(archivo)
+        if refresh_bytes:
+            st.download_button(
+                "⬇️ Descargar Refresh de origen (Excel)",
+                data=refresh_bytes,
+                file_name="Refresh.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"btn_refresh_{key_ns}",
+            )
+    with col_desc_b:
+        if excel_pendientes:
+            n_pend = int((detalle["Facturado"] == "No").sum())
+            st.download_button(
+                f"⬇️ Descargar no facturadas (Excel) · {n_pend} OC",
+                data=excel_pendientes,
+                file_name=f"Pendientes_{cfg['hoja']}_S{semana}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"btn_pendientes_{key_ns}",
+            )
+        else:
+            st.success("✅ Todas las OC de esta semana ya aparecen como Facturadas.")
+
+    st.subheader("Detalle por OC (van en camión)")
+    tab_calendario, tab_tabla = st.tabs(["🗓️ Calendario", "📋 Tabla"])
+    with tab_calendario:
+        st.caption("Una columna por día, tarjetas con Pedido, OC, Monto y Pallets — "
+                   "ordenadas por ventana y prioridad.")
+        render_calendario(detalle, resumen)
+    with tab_tabla:
+        st.caption("Las filas en verde ya aparecen como Facturadas en la tabla externa.")
+        st.dataframe(
+            detalle.style.apply(_resaltar_facturado, axis=1).format({
+                "Pallets": "{:.0f}", "Monto": lambda v: formato_clp(v),
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+    st.subheader("Plan de camiones")
+    st.caption("Los números de Pedido en verde ya aparecen como Facturados. "
+               "La columna % Facturado indica qué proporción de ese camión ya se despachó.")
+    render_tabla_camiones(resumen, detalle)
+
+    if not tabla_directos.empty:
+        st.subheader("Directos (información, NO ocupan camión/ventana)")
+        st.caption(f"{info['lineas_directos']} líneas / {info['oc_directos']} OC con "
+                   "proveedor directo asignado.")
+        st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "⬇️ Descargar plan en Excel",
+        data=exportar_excel(resumen, detalle, tabla_directos),
+        file_name=f"Plan_Despacho_{cfg['hoja']}_S{semana}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"btn_plan_{key_ns}",
+    )
+
+
 def render():
     _header()
 
@@ -1785,146 +1988,15 @@ def render():
         )
         return
 
-
-    tab_despacho, tab_bbd = st.tabs(
-        ["🚚 Plan de Despacho", "🧬 Stock y Caducidad (BBD STOCK)"]
+    tab_sb, tab_pu, tab_bbd = st.tabs(
+        ["SB", "PU", "🧬 Stock y Caducidad (BBD STOCK)"]
     )
 
-    with tab_despacho:
-        df = leer_sb(archivo)
-        semanas_disp = sorted(df["Semana"].dropna().unique().tolist())
+    with tab_sb:
+        render_plan_hoja(archivo, HOJAS_CONFIG["SB"])
 
-        semana = st.radio(
-            "Semana a planificar", semanas_disp, horizontal=True,
-            index=len(semanas_disp) - 1 if semanas_disp else 0,
-        )
-
-        # El año no se pide al usuario: se infiere de la Fecha vence de esa
-        # misma semana en el Refresh (necesario solo para ubicar el Lunes ISO).
-        _fechas_semana = pd.to_datetime(
-            df.loc[df["Semana"] == semana, "Fecha vence"], errors="coerce"
-        ).dropna()
-        anio = int(_fechas_semana.dt.year.mode().iloc[0]) if not _fechas_semana.empty \
-            else datetime.date.today().year
-
-        with st.sidebar:
-            st.markdown("### ⚙️ Configuración")
-            pallet_col = st.radio(
-                "Columna a usar para calcular pallets por OC",
-                ["Pallets Pos.", "Pallets posibles"],
-                help="'Pallets Pos.' viene acotada (0.3/1). 'Pallets posibles' es la "
-                     "fracción real sin redondear.",
-            )
-            capacidades = st.multiselect("Capacidades de camión disponibles (pallets)",
-                                          [13, 16], default=[13, 16])
-            dias = st.multiselect("Días hábiles de despacho",
-                                   ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"],
-                                   default=["Lunes", "Martes", "Miercoles", "Jueves", "Viernes"])
-            ventanas_por_dia = st.number_input("Ventanas de despacho por día", value=4, min_value=1)
-            st.caption("Los productos con nombre en 'Directos' se sacan ANTES de armar los "
-                       "camiones (no ocupan pallets/ventanas) y quedan solo como información. "
-                       "Farma y Consumo Masivo nunca comparten camión. "
-                       "Orden de carga del resto: 1) Solicitado=1er Posible, "
-                       "2) cubierto con Pronto-vence, 5) parcial sin cobertura, 3) sin 1er Posible.")
-            orden_prioridad = [1, 2, 5, 3]
-
-        facturados = cargar_facturados_desde_refresh(archivo)
-        if facturados:
-            st.caption(
-                f"✅ {len(facturados)} pedidos detectados como Facturados desde la pestaña "
-                "OC del Refresh (automático, sin archivo aparte)."
-            )
-
-        if not capacidades or not dias:
-            st.warning("Elige al menos una capacidad de camión y un día hábil.")
-            return
-
-        resumen, detalle, info, tabla_directos = generar_plan(
-            df, semana, int(anio), pallet_col, capacidades, dias,
-            int(ventanas_por_dia), orden_prioridad, facturados,
-        )
-
-        if resumen is None:
-            st.warning(f"No hay OC para camión en la semana {semana} "
-                        f"(revisa si todas quedaron como Directos).")
-            if not tabla_directos.empty:
-                st.subheader("Directos (información, no van en camión)")
-                st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
-            return
-
-        holgura = info["ventanas_disponibles"] - info["camiones"]
-        render_kpi_cards([
-            {"value": info["camiones"], "label": "Camiones necesarios"},
-            {"value": info["ventanas_disponibles"], "label": "Ventanas disponibles"},
-            {
-                "value": holgura, "label": "Holgura",
-                "badge_text": "Atención" if holgura < 0 else "OK",
-                "badge_color": "#E4572E" if holgura < 0 else "#1DB980",
-            },
-            {"value": info["oc_directos"], "label": "OC 100% Directos"},
-            {"value": info["oc_facturadas"], "label": "OC ya Facturadas"},
-        ])
-        if info["overflow"]:
-            st.error("⚠️ No alcanzan las ventanas de la semana para todos los camiones "
-                      "necesarios. Suma días/ventanas o revisa las capacidades.")
-
-        excel_pendientes = exportar_pendientes_excel(detalle)
-        col_desc_a, col_desc_b = st.columns(2)
-        with col_desc_a:
-            refresh_bytes = _bytes_archivo_original(archivo)
-            if refresh_bytes:
-                st.download_button(
-                    "⬇️ Descargar Refresh de origen (Excel)",
-                    data=refresh_bytes,
-                    file_name="Refresh.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
-        with col_desc_b:
-            if excel_pendientes:
-                n_pend = int((detalle["Facturado"] == "No").sum())
-                st.download_button(
-                    f"⬇️ Descargar no facturadas (Excel) · {n_pend} OC",
-                    data=excel_pendientes,
-                    file_name=f"Pendientes_S{semana}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
-            else:
-                st.success("✅ Todas las OC de esta semana ya aparecen como Facturadas.")
-
-        st.subheader("Detalle por OC (van en camión)")
-        tab_calendario, tab_tabla = st.tabs(["🗓️ Calendario", "📋 Tabla"])
-        with tab_calendario:
-            st.caption("Una columna por día, tarjetas con Pedido, OC, Monto y Pallets — "
-                       "ordenadas por ventana y prioridad.")
-            render_calendario(detalle, resumen)
-        with tab_tabla:
-            st.caption("Las filas en verde ya aparecen como Facturadas en la tabla externa.")
-            st.dataframe(
-                detalle.style.apply(_resaltar_facturado, axis=1).format({
-                    "Pallets": "{:.0f}", "Monto": lambda v: formato_clp(v),
-                }),
-                use_container_width=True, hide_index=True,
-            )
-
-        st.subheader("Plan de camiones")
-        st.caption("Los números de Pedido en verde ya aparecen como Facturados. "
-                   "La columna % Facturado indica qué proporción de ese camión ya se despachó.")
-        render_tabla_camiones(resumen, detalle)
-
-        if not tabla_directos.empty:
-            st.subheader("Directos (información, NO ocupan camión/ventana)")
-            st.caption(f"{info['lineas_directos']} líneas / {info['oc_directos']} OC con "
-                       "proveedor directo asignado.")
-            st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
-
-        st.download_button(
-            "⬇️ Descargar plan en Excel",
-            data=exportar_excel(resumen, detalle, tabla_directos),
-            file_name=f"Plan_Despacho_S{semana}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    with tab_pu:
+        render_plan_hoja(archivo, HOJAS_CONFIG["PU"])
 
     with tab_bbd:
         try:
