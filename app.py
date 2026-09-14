@@ -252,8 +252,25 @@ HOJAS_CONFIG = {
 }
 
 
+def _version_archivo(archivo) -> str:
+    """Identificador que cambia cuando el archivo cambia, para poder usarlo
+    como parte de la clave de cache. Es necesario porque cuando 'archivo'
+    es una ruta fija en disco (ej. data/Refresh.xlsx), el string de la ruta
+    no cambia aunque el CONTENIDO del archivo se reemplace, y st.cache_data
+    seguiria devolviendo el resultado viejo para siempre."""
+    if isinstance(archivo, str):
+        try:
+            return str(os.path.getmtime(archivo))
+        except OSError:
+            return "0"
+    # Archivo subido por el usuario (UploadedFile): Streamlit ya lo hashea
+    # por contenido, pero devolvemos algo igual para mantener la firma
+    # de cache consistente.
+    return f"{getattr(archivo, 'name', '')}-{getattr(archivo, 'size', '')}"
+
+
 @st.cache_data(show_spinner="Leyendo pestaña del Refresh...")
-def leer_hoja(archivo, nombre_hoja: str) -> pd.DataFrame:
+def leer_hoja(archivo, nombre_hoja: str, version: str = "") -> pd.DataFrame:
     """Lee una pestaña del Refresh (SB o PU) y devuelve un DataFrame limpio."""
     try:
         archivo.seek(0)
@@ -279,7 +296,7 @@ def leer_hoja(archivo, nombre_hoja: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Revisando pestaña OC del Refresh...")
-def cargar_facturados_desde_refresh(archivo) -> dict:
+def cargar_facturados_desde_refresh(archivo, version: str = "") -> dict:
     """Detecta el estado de facturacion de cada Pedido usando la pestana 'OC'
     del mismo Refresh ('Pedido de Venta', 'Despacho', 'Pendiente'):
     - 'Sí': todas sus lineas ya se despacharon (Pendiente = 0).
@@ -1967,7 +1984,7 @@ def render_plan_hoja(archivo, cfg: dict):
     los widgets de ambas pestañas choquen entre si."""
     key_ns = cfg["hoja"].lower()
 
-    df = leer_hoja(archivo, cfg["hoja"])
+    df = leer_hoja(archivo, cfg["hoja"], version=_version_archivo(archivo))
     semanas_disp = sorted(df[cfg["semana"]].dropna().unique().tolist())
 
     semana = st.radio(
@@ -2048,7 +2065,7 @@ def render_plan_hoja(archivo, cfg: dict):
             )
         orden_prioridad = cfg["orden_prioridad"]
 
-    facturados = cargar_facturados_desde_refresh(archivo)
+    facturados = cargar_facturados_desde_refresh(archivo, version=_version_archivo(archivo))
     if facturados:
         st.caption(
             f"✅ {len(facturados)} pedidos detectados como Facturados desde la pestaña "
