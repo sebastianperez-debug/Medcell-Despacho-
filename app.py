@@ -275,11 +275,14 @@ def leer_hoja(archivo, nombre_hoja: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Revisando pestaña OC del Refresh...")
-def cargar_facturados_desde_refresh(archivo) -> set:
-    """Detecta automaticamente los Pedido con AL MENOS UNA linea/SKU ya
-    despachada, usando la pestana 'OC' del mismo Refresh (columnas
-    'Pedido de Venta' y 'Despacho'). Con que se haya despachado 1 sola linea
-    del pedido, el pedido completo se marca como Facturado."""
+def cargar_facturados_desde_refresh(archivo) -> dict:
+    """Detecta el estado de facturacion de cada Pedido usando la pestana 'OC'
+    del mismo Refresh ('Pedido de Venta', 'Despacho', 'Pendiente'):
+    - 'Sí': todas sus lineas ya se despacharon (Pendiente = 0).
+    - 'Parcial': al menos una linea se despacho, pero no todas (Despacho > 0
+      y Pendiente > 0).
+    - Si no aparece en el diccionario, se interpreta como 'No' (nada
+      despachado)."""
     try:
         archivo.seek(0)
     except Exception:
@@ -287,7 +290,7 @@ def cargar_facturados_desde_refresh(archivo) -> set:
     try:
         df_oc = pd.read_excel(archivo, sheet_name="OC")
     except Exception:
-        return set()
+        return {}
     finally:
         try:
             archivo.seek(0)
@@ -295,12 +298,20 @@ def cargar_facturados_desde_refresh(archivo) -> set:
             pass
 
     df_oc.columns = [str(c).strip() for c in df_oc.columns]
-    if "Pedido de Venta" not in df_oc.columns or "Despacho" not in df_oc.columns:
-        return set()
+    cols_necesarias = {"Pedido de Venta", "Despacho", "Pendiente"}
+    if not cols_necesarias.issubset(df_oc.columns):
+        return {}
 
-    despacho_total = df_oc.groupby("Pedido de Venta")["Despacho"].sum()
-    ya_facturados = despacho_total[despacho_total > 0].index
-    return {str(int(x)) for x in ya_facturados if pd.notna(x)}
+    resumen = df_oc.groupby("Pedido de Venta")[["Despacho", "Pendiente"]].sum()
+    estados = {}
+    for pedido, fila in resumen.iterrows():
+        if pd.isna(pedido):
+            continue
+        if fila["Despacho"] > 0 and fila["Pendiente"] <= 0:
+            estados[str(int(pedido))] = "Sí"
+        elif fila["Despacho"] > 0:
+            estados[str(int(pedido))] = "Parcial"
+    return estados
 
 
 # --------------------------------------------------------------------------
@@ -499,10 +510,10 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
 
 def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
                   capacidades: list[int], dias: list[str], ventanas_por_dia: int,
-                  orden_prioridad: list[int], facturados: set | None = None,
+                  orden_prioridad: list[int], facturados: dict | None = None,
                   cfg: dict | None = None):
     cfg = cfg or HOJAS_CONFIG["SB"]
-    facturados = facturados or set()
+    facturados = facturados or {}
     df_camion, df_directos = separar_directos(df, semana, cfg)
     tabla_directos = resumen_directos(df_directos, cfg)
     agg = agrupar_por_oc(df_camion, pallet_col, cfg)
@@ -529,26 +540,33 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
     detalle_rows = []
     for b in bins:
         for it in b["items"]:
-            es_facturado = str(it["Pedido"]).strip() in facturados
+            estado_fact = facturados.get(str(it["Pedido"]).strip(), "No")
             detalle_rows.append({
                 "Pedido (OC)": it["Pedido"], "OC": it["oc"], "Fecha vence": it["fecha_vence"],
                 "División": it["division"],
                 "Prioridad": it["prioridad"], "Descripción prioridad": it["prioridad_label"],
                 "Pallets": it["pallets"], "Monto": it.get("monto", 0), "# SKUs": it["n_sku"],
                 "Camión #": it["camion_num"], "Día": it["dia"], "Fecha": it.get("fecha"),
-                "Ventana": it["ventana"], "Facturado": "Sí" if es_facturado else "No",
+                "Ventana": it["ventana"], "Facturado": estado_fact,
             })
     detalle = pd.DataFrame(detalle_rows)
 
     info = {"camiones": len(bins), "ventanas_disponibles": len(slots), "overflow": overflow,
             "oc_directos": tabla_directos["Pedido"].nunique() if not tabla_directos.empty else 0,
             "lineas_directos": len(tabla_directos),
-            "oc_facturadas": int((detalle["Facturado"] == "Sí").sum())}
+            "oc_facturadas": int((detalle["Facturado"] == "Sí").sum()),
+            "oc_parciales": int((detalle["Facturado"] == "Parcial").sum())}
     return resumen, detalle, info, tabla_directos
 
 
 def _resaltar_facturado(row):
-    style = "background-color: #C6EFCE; color: #0b3d24" if row.get("Facturado") == "Sí" else ""
+    estado = row.get("Facturado")
+    if estado == "Sí":
+        style = "background-color: #C6EFCE; color: #0b3d24"
+    elif estado == "Parcial":
+        style = "background-color: #FDE3B8; color: #5C3A0B"
+    else:
+        style = ""
     return [style] * len(row)
 
 
@@ -595,10 +613,15 @@ def render_leyenda_calendario():
         "<span style='font-size:0.74rem;color:#8494AC;font-weight:600;"
         "margin-right:1rem;'>Colores de las tarjetas:</span>"
         f"{items_html}"
-        "<div style='display:flex;align-items:center;gap:0.4rem;'>"
+        "<div style='display:flex;align-items:center;gap:0.4rem;margin-right:1.1rem;'>"
         "<span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;"
         "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>FACTURADO</span>"
-        "<span style='font-size:0.74rem;color:#C7D2E0;'>= ya despachado según el Refresh</span>"
+        "<span style='font-size:0.74rem;color:#C7D2E0;'>= 100% despachado</span>"
+        "</div>"
+        "<div style='display:flex;align-items:center;gap:0.4rem;'>"
+        "<span style='background:#FDE3B8;color:#5C3A0B;font-size:0.6rem;"
+        "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>PARCIAL</span>"
+        "<span style='font-size:0.74rem;color:#C7D2E0;'>= algunas líneas despachadas, no todas</span>"
         "</div>"
         "</div>"
     )
@@ -632,10 +655,13 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                 util_prom = r_dia["Utilización %"].mean()
                 color_kpi = _semaforo_utilizacion(util_prom)
 
-        # KPI Facturados vs No Facturados del dia
+        # KPI Facturados vs Parcial vs No del dia
         n_facturados = int((sub["Facturado"] == "Sí").sum())
-        n_no_facturados = len(sub) - n_facturados
-        pct_facturado = (n_facturados / len(sub) * 100) if len(sub) else 0
+        n_parciales = int((sub["Facturado"] == "Parcial").sum())
+        n_no_facturados = len(sub) - n_facturados - n_parciales
+        total_sub = len(sub) if len(sub) else 1
+        pct_facturado = n_facturados / total_sub * 100
+        pct_parcial = n_parciales / total_sub * 100
 
         with col:
             st.markdown(
@@ -652,14 +678,16 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                 f"<div style='background:#141B2D;border:1px solid #232E45;border-radius:8px;"
                 f"padding:0.4rem 0.6rem;margin-bottom:0.6rem;'>"
                 f"<div style='font-size:0.68rem;color:#C7D2E0;font-weight:600;"
-                f"margin-bottom:0.25rem;'>Facturados vs No</div>"
+                f"margin-bottom:0.25rem;'>Facturados vs Parcial vs No</div>"
                 f"<div style='display:flex;width:100%;height:8px;border-radius:4px;"
                 f"overflow:hidden;background:#E4572E33;margin-bottom:0.25rem;'>"
                 f"<div style='width:{pct_facturado:.0f}%;background:#1DB980;'></div>"
+                f"<div style='width:{pct_parcial:.0f}%;background:#F2994A;'></div>"
                 f"</div>"
-                f"<div style='display:flex;justify-content:space-between;font-size:0.65rem;'>"
-                f"<span style='color:#1DB980;font-weight:700;'>✅ {n_facturados} facturadas</span>"
-                f"<span style='color:#E4572E;font-weight:700;'>⏳ {n_no_facturados} pendientes</span>"
+                f"<div style='display:flex;justify-content:space-between;font-size:0.62rem;'>"
+                f"<span style='color:#1DB980;font-weight:700;'>✅ {n_facturados}</span>"
+                f"<span style='color:#F2994A;font-weight:700;'>◐ {n_parciales}</span>"
+                f"<span style='color:#E4572E;font-weight:700;'>⏳ {n_no_facturados}</span>"
                 f"</div>"
                 f"</div>",
                 unsafe_allow_html=True,
@@ -689,11 +717,20 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                     st.markdown(ventana_html, unsafe_allow_html=True)
                     for _, row in sub_v.sort_values("Prioridad").iterrows():
                         color = _COLOR_PRIORIDAD.get(row["Prioridad"], "#888888")
-                        chip = (
-                            "<span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;"
-                            "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
-                            "margin-left:0.4rem;'>FACTURADO</span>"
-                        ) if row["Facturado"] == "Sí" else ""
+                        if row["Facturado"] == "Sí":
+                            chip = (
+                                "<span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;"
+                                "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
+                                "margin-left:0.4rem;'>FACTURADO</span>"
+                            )
+                        elif row["Facturado"] == "Parcial":
+                            chip = (
+                                "<span style='background:#FDE3B8;color:#5C3A0B;font-size:0.6rem;"
+                                "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
+                                "margin-left:0.4rem;'>PARCIAL</span>"
+                            )
+                        else:
+                            chip = ""
                         tarjeta_html = (
                             f"<div style='background:#141B2D;border-left:4px solid {color};"
                             "border-radius:6px;padding:0.5rem 0.7rem;margin-bottom:0.5rem;"
@@ -729,12 +766,18 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
         pedidos = [p.strip() for p in str(row["Pedidos incluidos"]).split(",") if p.strip()]
         n_fact = sum(1 for p in pedidos if facturado_map.get(p) == "Sí")
         pct_fact = (n_fact / len(pedidos) * 100) if pedidos else 0
-        pedidos_html = ", ".join(
-            f"<span style='background:#C6EFCE;color:#0b3d24;font-weight:700;"
-            f"border-radius:4px;padding:0 0.3rem;'>{p}</span>"
-            if facturado_map.get(p) == "Sí" else f"<span>{p}</span>"
-            for p in pedidos
-        )
+
+        def _chip(p):
+            estado = facturado_map.get(p)
+            if estado == "Sí":
+                return (f"<span style='background:#C6EFCE;color:#0b3d24;font-weight:700;"
+                        f"border-radius:4px;padding:0 0.3rem;'>{p}</span>")
+            if estado == "Parcial":
+                return (f"<span style='background:#FDE3B8;color:#5C3A0B;font-weight:700;"
+                        f"border-radius:4px;padding:0 0.3rem;'>{p}</span>")
+            return f"<span>{p}</span>"
+
+        pedidos_html = ", ".join(_chip(p) for p in pedidos)
         celdas = "".join(f"<td>{row[c]}</td>" for c in cols_base[:5])
         celdas += (
             f"<td style='text-align:right;'>{row['Tipo camión (pallets)']:.0f}</td>"
@@ -791,14 +834,14 @@ def _formatear_hoja_detalle(ws, df: pd.DataFrame):
 
 
 def exportar_pendientes_excel(detalle: pd.DataFrame) -> bytes | None:
-    """Excel SOLO con las OC que TODAVIA NO se facturan (Facturado = No, las
-    filas blancas de la tabla): Hoja 'Resumen' = tabla pivote División (filas)
-    x Día de despacho (columnas), igual estilo a la tabla de referencia
-    (categorías al costado, arriba); luego una pestaña por día con el
-    detalle completo."""
+    """Excel con las OC que NO estan 100% facturadas (Facturado = No o
+    Parcial): Hoja 'Resumen' = tabla pivote División (filas) x Día de
+    despacho (columnas), igual estilo a la tabla de referencia (categorías
+    al costado, arriba); luego una pestaña por día con el detalle completo
+    (incluye la columna Facturado para distinguir Parcial de No)."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-    pendientes = detalle[detalle["Facturado"] == "No"].copy()
+    pendientes = detalle[detalle["Facturado"] != "Sí"].copy()
     if pendientes.empty:
         return None
 
@@ -822,7 +865,15 @@ def exportar_pendientes_excel(detalle: pd.DataFrame) -> bytes | None:
             sub = pendientes[pendientes["Día"] == dia].drop(columns=["Día"], errors="ignore")
             nombre_hoja = dia[:31]
             sub.to_excel(writer, sheet_name=nombre_hoja, index=False)
-            _formatear_hoja_detalle(writer.sheets[nombre_hoja], sub)
+            ws_dia = writer.sheets[nombre_hoja]
+            _formatear_hoja_detalle(ws_dia, sub)
+            if "Facturado" in sub.columns:
+                naranjo = PatternFill("solid", fgColor="FDE3B8")
+                col_fact = sub.columns.get_loc("Facturado") + 1
+                for r, val in enumerate(sub["Facturado"], start=2):
+                    if val == "Parcial":
+                        for c in range(1, len(sub.columns) + 1):
+                            ws_dia.cell(row=r, column=c).fill = naranjo
 
         # --- Estilo hoja Resumen: encabezado azul Medcell + columna de
         # categorias resaltada, igual estructura que la tabla de referencia.
@@ -874,11 +925,12 @@ def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
         if "Facturado" in detalle.columns:
             ws = writer.sheets["Detalle Pedidos"]
             verde = PatternFill("solid", fgColor="C6EFCE")
-            col_idx = detalle.columns.get_loc("Facturado") + 1  # numero de columna Facturado
+            naranjo = PatternFill("solid", fgColor="FDE3B8")
             for r, val in enumerate(detalle["Facturado"], start=2):  # fila 1 = encabezado
-                if val == "Sí":
+                relleno = verde if val == "Sí" else naranjo if val == "Parcial" else None
+                if relleno:
                     for c in range(1, len(detalle.columns) + 1):
-                        ws.cell(row=r, column=c).fill = verde
+                        ws.cell(row=r, column=c).fill = relleno
 
         # Formato numerico limpio (2 decimales) en vez del "general" de Excel
         if "Pallets" in detalle.columns:
@@ -1983,9 +2035,9 @@ def render_plan_hoja(archivo, cfg: dict):
             )
     with col_desc_b:
         if excel_pendientes:
-            n_pend = int((detalle["Facturado"] == "No").sum())
+            n_pend = int((detalle["Facturado"] != "Sí").sum())
             st.download_button(
-                f"⬇️ Descargar no facturadas (Excel) · {n_pend} OC",
+                f"⬇️ Descargar no 100% facturadas (Excel) · {n_pend} OC",
                 data=excel_pendientes,
                 file_name=f"Pendientes_{cfg['hoja']}_S{semana}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2002,7 +2054,7 @@ def render_plan_hoja(archivo, cfg: dict):
                    "ordenadas por ventana y prioridad.")
         render_calendario(detalle, resumen)
     with tab_tabla:
-        st.caption("Las filas en verde ya aparecen como Facturadas en la tabla externa.")
+        st.caption("Verde = 100% Facturado, naranjo = despacho Parcial (según la pestaña OC del Refresh).")
         st.dataframe(
             detalle.style.apply(_resaltar_facturado, axis=1).format({
                 "Pallets": "{:.0f}", "Monto": lambda v: formato_clp(v),
@@ -2011,8 +2063,8 @@ def render_plan_hoja(archivo, cfg: dict):
         )
 
     st.subheader("Plan de camiones")
-    st.caption("Los números de Pedido en verde ya aparecen como Facturados. "
-               "La columna % Facturado indica qué proporción de ese camión ya se despachó.")
+    st.caption("Verde = 100% Facturado, naranjo = despacho Parcial. "
+               "La columna % Facturado indica qué proporción de ese camión ya se despachó al 100%.")
     render_tabla_camiones(resumen, detalle)
 
     if not tabla_directos.empty:
