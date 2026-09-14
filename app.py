@@ -220,16 +220,21 @@ HOJAS_CONFIG = {
         "sku": "SKU SB", "pallets_pos": "Pallets Pos.",
         "pallets_alt": "Pallets posibles", "usa_pronto_vence": True,
         "orden_prioridad": [1, 2, 5, 3],
-        "capacidades_opciones": [13, 16], "capacidades_default": [13, 16],
+        "capacidades_opciones": [13], "capacidades_default": [13],
         "dias_opciones": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"],
         "dias_default": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes"],
         "usa_transportes": False, "n_transportes": None,
-        # Flota real: 2 camiones de 13 pallets + 1 de 16, cada uno alcanza a
-        # hacer 2 vueltas por dia -> 6 ventanas/dia. Farma tiene un minimo
+        # Flota real: SOLO camiones de 13 pallets, con capacidad para hacer
+        # 2 vueltas por dia -> 6 ventanas/dia. Farma tiene un minimo
         # garantizado de camiones por dia (flexible: solo si hay OC de Farma
-        # esperando ese dia).
+        # esperando ese dia). Si el total de camiones de 13 no alcanza en
+        # las ventanas disponibles de la semana, como ULTIMO RECURSO se
+        # fusionan (de a pares, empezando por los menos prioritarios y
+        # siempre dentro de la misma division) en ramplas de 27 pallets
+        # -> ver "capacidad_rescate" y _consolidar_con_rampla().
         "ventanas_por_dia_default": 6,
         "minimo_por_division": {"FARMA": 2},
+        "capacidad_rescate": 27,
     },
     "PU": {
         "hoja": "PU", "semana": "Sem", "oc": "OC", "pedido": "Pedido",
@@ -476,7 +481,8 @@ def _intercalar_con_minimo_diario(bins_por_division: dict, dias: list[str],
 def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
                     orden_prioridad: list[int], dias: list[str] | None = None,
                     ventanas_por_dia: int | None = None,
-                    minimo_por_division: dict | None = None) -> list[dict]:
+                    minimo_por_division: dict | None = None,
+                    capacidad_rescate: int | None = None) -> list[dict]:
     """Arma camiones respetando 2 reglas duras:
     1) una OC nunca se parte entre camiones.
     2) Farma y Consumo Masivo NUNCA van en el mismo camion -> se empacan por
@@ -485,7 +491,14 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
     Si se entrega minimo_por_division (ej: {"FARMA": 2}) junto con dias y
     ventanas_por_dia, se reserva ese minimo de camiones de esa division
     dentro de CADA dia (si hay camiones de esa division esperando), en vez
-    de solo intercalar por prioridad global."""
+    de solo intercalar por prioridad global.
+
+    capacidad_rescate (ej: 27) se usa SOLO para etiquetar correctamente una
+    OC que por si sola ya supera la capacidad normal (cap_max): no se
+    fusiona nada aca (esa OC ya va sola, no se puede partir), solo se busca
+    el tipo de vehiculo mas chico que igual le alcance. La fusion real de
+    VARIOS camiones chicos en una rampla (el "ultimo recurso" cuando no
+    alcanzan las ventanas de la semana) la hace _consolidar_con_rampla."""
     cap_max = max(capacidades)
 
     def cerrar(b):
@@ -494,11 +507,15 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
         # fragmentos chicos (ej: 0.5 + 0.5) pueden compartir un mismo pallet
         # fisico en vez de que cada uno redondee a 1 por separado.
         b["total"] = math.ceil(round(b["total"], 6))
-        for cap in sorted(capacidades):
+        opciones = sorted(set(capacidades) | ({capacidad_rescate} if capacidad_rescate else set()))
+        for cap in opciones:
             if b["total"] <= cap:
                 b["camion"] = cap
                 return b
-        b["camion"] = cap_max
+        # Ni la rampla de rescate alcanza: OC excepcionalmente grande. No se
+        # parte igual (regla dura), pero se etiqueta con el tamano real
+        # necesario para que quede visible que requiere transporte especial.
+        b["camion"] = b["total"]
         return b
 
     def empacar(items):
@@ -544,6 +561,43 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
     bins_all = [b for bins in bins_por_division.values() for b in bins]
     bins_all.sort(key=lambda b: min(orden_prioridad.index(it["prioridad"]) for it in b["items"]))
     return bins_all
+
+
+def _consolidar_con_rampla(bins: list[dict], ventanas_disponibles: int,
+                            capacidad_rescate: int) -> list[dict]:
+    """Ultimo recurso cuando los camiones normales (13 pallets) no alcanzan
+    a caber en las ventanas disponibles de la semana (dias x ventanas/dia):
+    fusiona camiones de a pares -SIEMPRE dentro de la misma division, nunca
+    partiendo una OC- en ramplas de 'capacidad_rescate' pallets (27),
+    empezando por los camiones MENOS prioritarios (el final de la lista,
+    que ya viene ordenada de mas a menos urgente), hasta que el plan quepa
+    en las ventanas disponibles o ya no queden pares fusionables.
+
+    Si aun asi sobran camiones (division muy desbalanceada, por ejemplo),
+    esos quedan igual que antes: como overflow / "SIN VENTANA" en
+    asignar_ventanas."""
+    if ventanas_disponibles <= 0 or len(bins) <= ventanas_disponibles:
+        return bins
+
+    bins = list(bins)
+    cambiado = True
+    while len(bins) > ventanas_disponibles and cambiado:
+        cambiado = False
+        for i in range(len(bins) - 1, 0, -1):
+            b2 = bins[i]
+            for j in range(i - 1, -1, -1):
+                b1 = bins[j]
+                if (b1["division"] == b2["division"]
+                        and b1["total"] + b2["total"] <= capacidad_rescate):
+                    b1["items"] = b1["items"] + b2["items"]
+                    b1["total"] = b1["total"] + b2["total"]
+                    b1["camion"] = capacidad_rescate
+                    del bins[i]
+                    cambiado = True
+                    break
+            if cambiado:
+                break
+    return bins
 
 
 def asignar_ventanas(bins: list[dict], semana: int, anio: int,
@@ -608,10 +662,17 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
     if agg.empty:
         return None, None, None, tabla_directos
 
+    capacidad_rescate = cfg.get("capacidad_rescate")
     bins = armar_camiones(
         agg, capacidades, orden_prioridad, dias=dias, ventanas_por_dia=ventanas_por_dia,
         minimo_por_division=cfg.get("minimo_por_division"),
+        capacidad_rescate=capacidad_rescate,
     )
+
+    if capacidad_rescate and not cfg.get("usa_transportes", False):
+        ventanas_disponibles = len(dias) * ventanas_por_dia
+        bins = _consolidar_con_rampla(bins, ventanas_disponibles, capacidad_rescate)
+
     bins, slots, overflow = asignar_ventanas(
         bins, semana, anio, dias, ventanas_por_dia,
         usa_transportes=cfg.get("usa_transportes", False),
@@ -2036,8 +2097,16 @@ def render_plan_hoja(archivo, cfg: dict):
             ventanas_por_dia = st.number_input(
                 "Ventanas de despacho por día", value=cfg.get("ventanas_por_dia_default", 4),
                 min_value=1, key=f"ventanas_{key_ns}",
-                help="Flota real de SB: 2 camiones de 13 pallets + 1 de 16, cada uno hace "
+                help="Flota real de SB: camiones de 13 pallets, cada uno hace "
                      "2 vueltas por día = 6 ventanas/día." if cfg["hoja"] == "SB" else None,
+            )
+        if cfg.get("capacidad_rescate"):
+            st.caption(
+                f"🚛 Camiones normales de {cfg['capacidades_default'][0]} pallets. Si el total "
+                f"de camiones no alcanza en las ventanas disponibles de la semana "
+                f"({len(dias)} días × {ventanas_por_dia} ventanas), como ÚLTIMO RECURSO se "
+                f"fusionan los camiones menos prioritarios (misma división) en ramplas de "
+                f"{cfg['capacidad_rescate']} pallets."
             )
         if cfg["hoja"] == "PU":
             st.caption("📌 PU no se distribuye durante la semana: por defecto solo se "
