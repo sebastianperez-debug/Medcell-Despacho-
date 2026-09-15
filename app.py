@@ -801,7 +801,7 @@ def render_leyenda_calendario():
         "<span style='background:#5C0A0A;color:#FFD9D9;font-size:0.6rem;"
         "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>⚠️ EXCEDE CAPACIDAD</span>"
         "<span style='font-size:0.74rem;color:#C7D2E0;'>= una sola OC ya supera el transporte "
-        "más grande disponible; no puede despacharse tal como está</span>"
+        "más grande disponible → debe cancelarse tal como está</span>"
         "</div>"
         "</div>"
     )
@@ -903,33 +903,33 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                             chip = (
                                 "<span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;"
                                 "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
-                                "margin-left:0.4rem;'>FACTURADO</span>"
+                                "white-space:nowrap;margin-left:0.4rem;'>FACTURADO</span>"
                             )
                         elif row["Facturado"] == "Parcial":
                             chip = (
                                 "<span style='background:#FDE3B8;color:#5C3A0B;font-size:0.6rem;"
                                 "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
-                                "margin-left:0.4rem;'>PARCIAL</span>"
+                                "white-space:nowrap;margin-left:0.4rem;'>PARCIAL</span>"
                             )
                         else:
                             chip = ""
-                        if excede:
-                            chip += (
-                                "<span style='background:#5C0A0A;color:#FFD9D9;font-size:0.6rem;"
-                                "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
-                                "margin-left:0.4rem;'>⚠️ EXCEDE CAPACIDAD</span>"
-                            )
-                        nota_excede = (
-                            f"<div style='font-size:0.66rem;color:#FF8A80;margin-top:0.3rem;'>"
-                            f"Supera el transporte más grande disponible ({cap_max:.0f} pal) — "
-                            "revisar / dividir esta OC antes de despachar.</div>"
+                        # El aviso de "excede capacidad" va en su propia franja debajo
+                        # del titulo (no como chip en linea) para que no se corte / envuelva.
+                        banner_excede = (
+                            "<div style='background:#5C0A0A40;border:1px solid #5C0A0A;"
+                            "border-radius:4px;padding:0.2rem 0.5rem;margin-top:0.35rem;"
+                            "font-size:0.68rem;font-weight:700;color:#FF8A80;"
+                            "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>"
+                            f"⚠️ EXCEDE CAPACIDAD ({cap_max:.0f} pal máx.) — Cancelar OC"
+                            "</div>"
                         ) if excede else ""
                         tarjeta_html = (
                             f"<div style='background:#141B2D;border-left:4px solid {color};"
                             "border-radius:6px;padding:0.5rem 0.7rem;margin-bottom:0.5rem;"
                             "box-shadow:0 1px 2px rgba(0,0,0,0.2);'>"
-                            "<div style='font-weight:700;font-size:0.82rem;color:#F5F7FA;'>"
-                            f"Pedido {row['Pedido (OC)']}{chip}"
+                            "<div style='font-weight:700;font-size:0.82rem;color:#F5F7FA;"
+                            "display:flex;align-items:center;flex-wrap:wrap;gap:0.2rem;'>"
+                            f"<span>Pedido {row['Pedido (OC)']}</span>{chip}"
                             "</div>"
                             f"<div style='font-size:0.72rem;color:#8494AC;'>OC {row['OC']}</div>"
                             "<div style='display:flex;justify-content:space-between;"
@@ -938,17 +938,21 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                             f"<span style='color:{'#FF6B6B' if excede else '#3B9EFF'};font-weight:600;'>"
                             f"{row['Pallets']:.0f} pal</span>"
                             "</div>"
-                            f"{nota_excede}"
+                            f"{banner_excede}"
                             "</div>"
                         )
                         st.markdown(tarjeta_html, unsafe_allow_html=True)
 
 
-def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
+def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame, cap_max: float | None = None):
     """Tabla 'Plan de camiones' en HTML (para poder pintar en verde, dentro
     de la misma celda, los numeros de Pedido que ya estan Facturados) mas
-    una columna extra de % Facturado por camion."""
+    una columna extra de % Facturado por camion. Si cap_max viene informado,
+    las filas/pedidos que superan esa capacidad maxima real se pintan en
+    rojo para detectarlas al toque (ese "camion" es ficticio: el sistema le
+    puso el tamaño de la OC porque no entraba en ningun transporte real)."""
     facturado_map = dict(zip(detalle["Pedido (OC)"].astype(str), detalle["Facturado"]))
+    pallets_map = dict(zip(detalle["Pedido (OC)"].astype(str), detalle["Pallets"]))
 
     cols_base = ["Camión #", "Día", "Fecha", "Ventana", "División",
                  "Tipo camión (pallets)", "Pallets cargados", "Capacidad",
@@ -961,9 +965,14 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
         pedidos = [p.strip() for p in str(row["Pedidos incluidos"]).split(",") if p.strip()]
         n_fact = sum(1 for p in pedidos if facturado_map.get(p) == "Sí")
         pct_fact = (n_fact / len(pedidos) * 100) if pedidos else 0
+        camion_excede = cap_max is not None and row["Tipo camión (pallets)"] > cap_max
 
         def _chip(p):
+            excede_p = cap_max is not None and pallets_map.get(p, 0) > cap_max
             estado = facturado_map.get(p)
+            if excede_p:
+                return (f"<span style='background:#5C0A0A;color:#FFD9D9;font-weight:700;"
+                        f"border-radius:4px;padding:0 0.3rem;'>⚠️ {p}</span>")
             if estado == "Sí":
                 return (f"<span style='background:#C6EFCE;color:#0b3d24;font-weight:700;"
                         f"border-radius:4px;padding:0 0.3rem;'>{p}</span>")
@@ -973,16 +982,19 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame):
             return f"<span>{p}</span>"
 
         pedidos_html = ", ".join(_chip(p) for p in pedidos)
+        fila_style = " style='background:#5C0A0A26;'" if camion_excede else ""
         celdas = "".join(f"<td>{row[c]}</td>" for c in cols_base[:5])
+        color_tipo = "color:#FF8A80;font-weight:700;" if camion_excede else ""
         celdas += (
-            f"<td style='text-align:right;'>{row['Tipo camión (pallets)']:.0f}</td>"
+            f"<td style='text-align:right;{color_tipo}'>{row['Tipo camión (pallets)']:.0f}"
+            f"{' ⚠️' if camion_excede else ''}</td>"
             f"<td style='text-align:right;'>{row['Pallets cargados']:.0f}</td>"
             f"<td style='text-align:right;'>{row['Capacidad']:.0f}</td>"
             f"<td style='text-align:right;'>{row['Utilización %']:.1f}%</td>"
             f"<td style='text-align:right;color:#1DB980;font-weight:700;'>{pct_fact:.0f}%</td>"
             f"<td>{pedidos_html}</td>"
         )
-        filas_html.append(f"<tr>{celdas}</tr>")
+        filas_html.append(f"<tr{fila_style}>{celdas}</tr>")
 
     tabla_html = (
         "<div style='overflow-x:auto;border:1px solid #232E45;border-radius:8px;'>"
@@ -2333,7 +2345,7 @@ def render_plan_hoja(archivo, cfg: dict):
     st.subheader("Plan de camiones")
     st.caption("Verde = 100% Facturado, naranjo = despacho Parcial. "
                "La columna % Facturado indica qué proporción de ese camión ya se despachó al 100%.")
-    render_tabla_camiones(resumen, detalle)
+    render_tabla_camiones(resumen, detalle, cap_max)
 
     if not tabla_directos.empty:
         st.subheader("Directos (información, NO ocupan camión/ventana)")
