@@ -718,15 +718,30 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
     return resumen, detalle, info, tabla_directos
 
 
-def _resaltar_facturado(row):
-    estado = row.get("Facturado")
-    if estado == "Sí":
-        style = "background-color: #C6EFCE; color: #0b3d24"
-    elif estado == "Parcial":
-        style = "background-color: #FDE3B8; color: #5C3A0B"
-    else:
-        style = ""
-    return [style] * len(row)
+def _resaltar_facturado_factory(cap_max: float | None = None):
+    """Devuelve una función de estilo por fila para el .style.apply() de la
+    tabla 'Detalle por OC'. Si cap_max viene informado, cualquier OC cuyos
+    Pallets superen esa capacidad máxima de transporte disponible se pinta
+    de rojo oscuro (tiene prioridad visual por sobre Facturado/Parcial,
+    porque esa OC no puede despacharse tal como está — hay que corregirla
+    o dividirla)."""
+    def _fn(row):
+        estado = row.get("Facturado")
+        excede = cap_max is not None and row.get("Pallets", 0) > cap_max
+        if excede:
+            style = "background-color: #5C0A0A; color: #FFD9D9; font-weight: 700"
+        elif estado == "Sí":
+            style = "background-color: #C6EFCE; color: #0b3d24"
+        elif estado == "Parcial":
+            style = "background-color: #FDE3B8; color: #5C3A0B"
+        else:
+            style = ""
+        return [style] * len(row)
+    return _fn
+
+
+# Se mantiene el nombre viejo por compatibilidad (sin el chequeo de capacidad).
+_resaltar_facturado = _resaltar_facturado_factory()
 
 
 def formato_clp(valor) -> str:
@@ -777,17 +792,24 @@ def render_leyenda_calendario():
         "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>FACTURADO</span>"
         "<span style='font-size:0.74rem;color:#C7D2E0;'>= 100% despachado</span>"
         "</div>"
-        "<div style='display:flex;align-items:center;gap:0.4rem;'>"
+        "<div style='display:flex;align-items:center;gap:0.4rem;margin-right:1.1rem;'>"
         "<span style='background:#FDE3B8;color:#5C3A0B;font-size:0.6rem;"
         "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>PARCIAL</span>"
         "<span style='font-size:0.74rem;color:#C7D2E0;'>= algunas líneas despachadas, no todas</span>"
+        "</div>"
+        "<div style='display:flex;align-items:center;gap:0.4rem;'>"
+        "<span style='background:#5C0A0A;color:#FFD9D9;font-size:0.6rem;"
+        "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;'>⚠️ EXCEDE CAPACIDAD</span>"
+        "<span style='font-size:0.74rem;color:#C7D2E0;'>= una sola OC ya supera el transporte "
+        "más grande disponible; no puede despacharse tal como está</span>"
         "</div>"
         "</div>"
     )
     st.markdown(leyenda_html, unsafe_allow_html=True)
 
 
-def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None):
+def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None,
+                       cap_max: float | None = None):
     """Vista tipo calendario/kanban: una columna por dia, con un KPI de
     despacho arriba (camiones, utilizacion y Facturados vs No) y tarjetas por
     OC con Pedido, OC, Monto y Pallets."""
@@ -875,7 +897,8 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                     )
                     st.markdown(ventana_html, unsafe_allow_html=True)
                     for _, row in sub_v.sort_values("Prioridad").iterrows():
-                        color = _COLOR_PRIORIDAD.get(row["Prioridad"], "#888888")
+                        excede = cap_max is not None and row["Pallets"] > cap_max
+                        color = "#5C0A0A" if excede else _COLOR_PRIORIDAD.get(row["Prioridad"], "#888888")
                         if row["Facturado"] == "Sí":
                             chip = (
                                 "<span style='background:#C6EFCE;color:#0b3d24;font-size:0.6rem;"
@@ -890,6 +913,17 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                             )
                         else:
                             chip = ""
+                        if excede:
+                            chip += (
+                                "<span style='background:#5C0A0A;color:#FFD9D9;font-size:0.6rem;"
+                                "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
+                                "margin-left:0.4rem;'>⚠️ EXCEDE CAPACIDAD</span>"
+                            )
+                        nota_excede = (
+                            f"<div style='font-size:0.66rem;color:#FF8A80;margin-top:0.3rem;'>"
+                            f"Supera el transporte más grande disponible ({cap_max:.0f} pal) — "
+                            "revisar / dividir esta OC antes de despachar.</div>"
+                        ) if excede else ""
                         tarjeta_html = (
                             f"<div style='background:#141B2D;border-left:4px solid {color};"
                             "border-radius:6px;padding:0.5rem 0.7rem;margin-bottom:0.5rem;"
@@ -901,8 +935,10 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                             "<div style='display:flex;justify-content:space-between;"
                             "margin-top:0.3rem;font-size:0.76rem;color:#C7D2E0;'>"
                             f"<span>{formato_clp(row['Monto'])}</span>"
-                            f"<span style='color:#3B9EFF;font-weight:600;'>{row['Pallets']:.0f} pal</span>"
+                            f"<span style='color:{'#FF6B6B' if excede else '#3B9EFF'};font-weight:600;'>"
+                            f"{row['Pallets']:.0f} pal</span>"
                             "</div>"
+                            f"{nota_excede}"
                             "</div>"
                         )
                         st.markdown(tarjeta_html, unsafe_allow_html=True)
@@ -2246,16 +2282,49 @@ def render_plan_hoja(archivo, cfg: dict):
         else:
             st.success("✅ Todas las OC de esta semana ya aparecen como Facturadas.")
 
+    # Capacidad máxima real disponible = el camión/rampla más grande que se
+    # pueda usar (incluye la rampla de rescate). Una OC individual con más
+    # pallets que esto NO puede despacharse tal cual, sin importar cómo se
+    # arme el plan — se marca en rojo para que se revise/divida.
+    cap_max = max(list(capacidades) + ([cfg["capacidad_rescate"]] if cfg.get("capacidad_rescate") else [])) \
+        if capacidades else cfg.get("capacidad_rescate")
+
     st.subheader("Detalle por OC (van en camión)")
+    busqueda_oc = st.text_input(
+        "🔍 Buscar por N° de Pedido o de OC",
+        placeholder="Ej: 101668 u 8757515",
+        key=f"buscar_oc_{key_ns}",
+    )
+    detalle_vista = detalle
+    if busqueda_oc.strip():
+        q = busqueda_oc.strip()
+        match = (
+            detalle["Pedido (OC)"].astype(str).str.contains(q, case=False, na=False)
+            | detalle["OC"].astype(str).str.contains(q, case=False, na=False)
+        )
+        detalle_vista = detalle[match]
+        if detalle_vista.empty:
+            st.warning(f"No se encontró ningún Pedido ni OC que coincida con '{q}' en esta semana.")
+        else:
+            for _, r in detalle_vista.iterrows():
+                fecha_r = r["Fecha"].strftime("%d-%m-%Y") if hasattr(r["Fecha"], "strftime") else ""
+                st.info(
+                    f"📦 Pedido **{r['Pedido (OC)']}** (OC {r['OC']}) → se despacha el "
+                    f"**{r['Día']} {fecha_r}**, Camión #{r['Camión #']}, Ventana {r['Ventana']} "
+                    f"· {r['Pallets']:.0f} pal."
+                )
+
     tab_calendario, tab_tabla = st.tabs(["🗓️ Calendario", "📋 Tabla"])
     with tab_calendario:
         st.caption("Una columna por día, tarjetas con Pedido, OC, Monto y Pallets — "
                    "ordenadas por ventana y prioridad.")
-        render_calendario(detalle, resumen)
+        render_calendario(detalle_vista, resumen, cap_max)
     with tab_tabla:
-        st.caption("Verde = 100% Facturado, naranjo = despacho Parcial (según la pestaña OC del Refresh).")
+        st.caption("Verde = 100% Facturado, naranjo = despacho Parcial (según la pestaña OC del Refresh). "
+                    "Rojo oscuro = la OC por sí sola supera la capacidad máxima de transporte disponible "
+                    f"({cap_max:.0f} pal) y debe revisarse." if cap_max else "")
         st.dataframe(
-            detalle.style.apply(_resaltar_facturado, axis=1).format({
+            detalle_vista.style.apply(_resaltar_facturado_factory(cap_max), axis=1).format({
                 "Pallets": "{:.0f}", "Monto": lambda v: formato_clp(v),
             }),
             use_container_width=True, hide_index=True,
