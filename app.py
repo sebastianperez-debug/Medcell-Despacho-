@@ -557,6 +557,13 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
             b["division"] = division
         bins_por_division[division] = bins_dv
 
+    # Antes de intercalar por prioridad/ventana: si alguna OC gigante ya
+    # obligo a usar una rampla de rescate, aprovechamos el espacio libre
+    # que le quedo con otros camiones normales completos de la misma
+    # division (ver _rellenar_ramplas_con_sobrantes). Asi no se paga una
+    # rampla cara a medio uso Y una ventana normal aparte para lo mismo.
+    bins_por_division = _rellenar_ramplas_con_sobrantes(bins_por_division, capacidad_rescate)
+
     if minimo_por_division and dias and ventanas_por_dia:
         return _intercalar_con_minimo_diario(
             bins_por_division, dias, ventanas_por_dia, minimo_por_division, orden_prioridad,
@@ -568,6 +575,60 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
     bins_all = [b for bins in bins_por_division.values() for b in bins]
     bins_all.sort(key=lambda b: min(orden_prioridad.index(it["prioridad"]) for it in b["items"]))
     return bins_all
+
+
+def _rellenar_ramplas_con_sobrantes(bins_por_division: dict, capacidad_rescate: int | None) -> dict:
+    """Aprovecha el espacio que quede libre en una rampla de rescate que ya
+    se armo por FUERZA (porque una OC por si sola supera la capacidad normal
+    y no se puede partir), sumandole ahi camiones normales COMPLETOS de la
+    misma division que quepan enteros en ese espacio libre.
+
+    Idea: si esa rampla (flota externa, mas cara) ya se va a pagar si o si
+    por la OC gigante, es mejor llenarla al maximo con otras OC en vez de
+    dejarla a medio uso Y ademas gastar una ventana/camion normal aparte
+    para esas otras OC. No se crean ramplas nuevas aca (eso lo sigue
+    haciendo _consolidar_con_rampla solo cuando faltan ventanas): esto solo
+    reaprovecha ramplas que YA existian.
+
+    Reglas duras que se respetan igual que en armar_camiones:
+    - nunca se parte una OC (se mueven camiones COMPLETOS, no OC sueltas).
+    - nunca se mezcla una division con otra (el barrido es division por
+      division).
+    """
+    if not capacidad_rescate:
+        return bins_por_division
+
+    for division, bins in bins_por_division.items():
+        ramplas = [b for b in bins if b["camion"] == capacidad_rescate]
+        normales = [b for b in bins if b["camion"] != capacidad_rescate]
+        if not ramplas or not normales:
+            continue
+
+        # First-fit-decreasing: probamos primero los camiones normales mas
+        # grandes, asi el espacio libre de la rampla se llena mejor (menos
+        # huecos) que si probamos en cualquier orden.
+        normales.sort(key=lambda b: -b["total"])
+
+        for rampla in ramplas:
+            libre = capacidad_rescate - rampla["total"]
+            if libre <= 0:
+                continue
+            i = 0
+            while i < len(normales):
+                candidato = normales[i]
+                if candidato["total"] <= libre + 1e-6:
+                    rampla["items"] = rampla["items"] + candidato["items"]
+                    rampla["total"] = rampla["total"] + candidato["total"]
+                    libre -= candidato["total"]
+                    normales.pop(i)
+                    # no avanzamos i: puede que el siguiente (mas chico)
+                    # tambien quepa en lo que sobro del espacio libre.
+                else:
+                    i += 1
+
+        bins_por_division[division] = ramplas + normales
+
+    return bins_por_division
 
 
 def _consolidar_con_rampla(bins: list[dict], ventanas_disponibles: int,
