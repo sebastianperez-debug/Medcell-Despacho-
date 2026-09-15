@@ -233,8 +233,15 @@ HOJAS_CONFIG = {
         # siempre dentro de la misma division) en ramplas de 27 pallets
         # -> ver "capacidad_rescate" y _consolidar_con_rampla().
         "ventanas_por_dia_default": 6,
+        "n_camiones_default": 3,
+        "vueltas_por_camion_default": 2,
         "minimo_por_division": {"FARMA": 2},
         "capacidad_rescate": 27,
+        # Para SB el calculo de pallets SIEMPRE usa "Pallets Pos." (columna
+        # AH del Refresh): no se ofrece alternativa en la UI para evitar que
+        # alguien elija sin querer una columna distinta y el numero de
+        # pallets mostrado deje de calzar con el Excel de origen.
+        "forzar_pallet_col": True,
     },
     "PU": {
         "hoja": "PU", "semana": "Sem", "oc": "OC", "pedido": "Pedido",
@@ -2066,14 +2073,21 @@ def render_plan_hoja(archivo, cfg: dict):
 
     with st.sidebar:
         st.markdown(f"### ⚙️ Configuración — {cfg['hoja']}")
-        pallet_col = st.radio(
-            "Columna a usar para calcular pallets por OC",
-            opciones_pallets,
-            help="'Pallets Pos.' viene acotada (0.3/1)."
-                 + (" 'Pallets posibles' es la fracción real sin redondear."
-                    if cfg["pallets_alt"] else ""),
-            key=f"pallet_col_{key_ns}",
-        )
+        if cfg.get("forzar_pallet_col"):
+            # SB: la columna de pallets queda fija en "Pallets Pos." (AH del
+            # Refresh) sin opcion de cambiarla, para que el numero mostrado
+            # SIEMPRE calce con esa columna del Excel de origen.
+            pallet_col = cfg["pallets_pos"]
+            st.caption(f"📦 Pallets por OC = columna **'{pallet_col}'** del Refresh (fija).")
+        else:
+            pallet_col = st.radio(
+                "Columna a usar para calcular pallets por OC",
+                opciones_pallets,
+                help="'Pallets Pos.' viene acotada (0.3/1)."
+                     + (" 'Pallets posibles' es la fracción real sin redondear."
+                        if cfg["pallets_alt"] else ""),
+                key=f"pallet_col_{key_ns}",
+            )
         capacidades = st.multiselect(
             "Capacidades de camión disponibles (pallets)",
             cfg["capacidades_opciones"], default=cfg["capacidades_default"],
@@ -2093,19 +2107,37 @@ def render_plan_hoja(archivo, cfg: dict):
             )
             ventanas_por_dia = 1  # no se usa en modo transportes, pero debe existir
             cfg = {**cfg, "n_transportes": int(n_transportes)}
+        elif cfg["hoja"] == "SB":
+            # Flota real de SB: N camiones de 13 pallets, cada uno hace
+            # V vueltas por dia -> ventanas/dia = N x V. Se pide asi (camiones
+            # x vueltas) en vez de un numero de "ventanas" suelto, para que
+            # quede claro y a prueba de error cual es la flota real.
+            col_cam, col_vta = st.columns(2)
+            with col_cam:
+                n_camiones = st.number_input(
+                    "Camiones disponibles", value=cfg.get("n_camiones_default", 3),
+                    min_value=1, key=f"n_camiones_{key_ns}",
+                    help="Camiones de 13 pallets con los que cuenta SB.",
+                )
+            with col_vta:
+                vueltas_por_camion = st.number_input(
+                    "Vueltas por camión al día", value=cfg.get("vueltas_por_camion_default", 2),
+                    min_value=1, key=f"vueltas_{key_ns}",
+                )
+            ventanas_por_dia = int(n_camiones) * int(vueltas_por_camion)
+            st.caption(f"= {ventanas_por_dia} ventanas/día ({n_camiones} camiones × {vueltas_por_camion} vueltas).")
         else:
             ventanas_por_dia = st.number_input(
                 "Ventanas de despacho por día", value=cfg.get("ventanas_por_dia_default", 4),
                 min_value=1, key=f"ventanas_{key_ns}",
-                help="Flota real de SB: camiones de 13 pallets, cada uno hace "
-                     "2 vueltas por día = 6 ventanas/día." if cfg["hoja"] == "SB" else None,
             )
         if cfg.get("capacidad_rescate"):
             st.caption(
                 f"🚛 Camiones normales de {cfg['capacidades_default'][0]} pallets. Si el total "
                 f"de camiones no alcanza en las ventanas disponibles de la semana "
-                f"({len(dias)} días × {ventanas_por_dia} ventanas), como ÚLTIMO RECURSO se "
-                f"fusionan los camiones menos prioritarios (misma división) en ramplas de "
+                f"({len(dias)} días × {ventanas_por_dia} ventanas) -es decir, no alcanza la "
+                f"cubicación para despachar todo-, como ÚLTIMO RECURSO se fusionan los "
+                f"camiones menos prioritarios (misma división) en ramplas de "
                 f"{cfg['capacidad_rescate']} pallets."
             )
         if cfg["hoja"] == "PU":
