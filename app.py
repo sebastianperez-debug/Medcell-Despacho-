@@ -1493,16 +1493,15 @@ def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
 def _pestana_checklist_de(division: str) -> str:
     """A que pestaña del checklist de carga va cada division real del
     Refresh: todo lo que contenga 'FARMA' -> 'Farma'; cualquier otra
-    division (Consumo Masivo, etc.) -> 'Salcobrand' (el cliente de consumo
-    masivo actual)."""
-    return "Farma" if "FARMA" in str(division).upper() else "Salcobrand"
+    division (Consumo Masivo, etc.) -> 'Consumo'."""
+    return "Farma" if "FARMA" in str(division).upper() else "Consumo"
 
 
 def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes | None:
     """Genera el Excel de checklist de carga, con el mismo formato que usa
     Operaciones a mano en Google Sheets (título de cliente/división arriba,
     columna de verificación en blanco, numeración de carga): UNA pestaña
-    por división ('Farma' para Farma, 'Salcobrand' para el resto), con
+    por división ('Farma' para Farma, 'Consumo' para el resto), con
     TODAS las OC de la semana (esten o no facturadas). Cada pestaña trae:
     - 'Carga OC': numeración correlativa 1..N DENTRO de esa pestaña, en el
       mismo orden cronológico (Fecha -> Ventana -> Prioridad) que ya trae
@@ -1555,7 +1554,7 @@ def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes 
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         hay_alguna_hoja = False
-        for pestana in ["Farma", "Salcobrand"]:
+        for pestana in ["Farma", "Consumo"]:
             sub = d[d["_pestana"] == pestana].copy()
             if sub.empty:
                 continue
@@ -3116,11 +3115,11 @@ def render_plan_hoja(archivo, cfg: dict):
         st.download_button(
             "⬇️ Descargar checklist de carga (Excel)",
             data=excel_checklist,
-            file_name=f"Checklist_Carga_{cfg['hoja']}_S{semana}.xlsx",
+            file_name=f"Plan_de_Despacho_{cfg['hoja']}_S{semana}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key=f"btn_plan_{key_ns}",
             help="Todas las OC de la semana (facturadas o no), separadas en pestañas "
-                 "'Farma' y 'Salcobrand' (Consumo), con numeración de carga, día de "
+                 "'Farma' y 'Consumo', con numeración de carga, día de "
                  "despacho, N° de camión con línea de separación entre camiones y "
                  "casillero de verificación, igual formato al que se usa a mano en "
                  "Operaciones.",
