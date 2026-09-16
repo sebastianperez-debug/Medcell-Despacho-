@@ -1481,17 +1481,16 @@ def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
 
 def _pestana_checklist_de(division: str) -> str:
     """A que pestaña del checklist de carga va cada division real del
-    Refresh: todo lo que contenga 'FARMA' -> 'Farma'; cualquier otra
-    division (Consumo Masivo, etc.) -> 'Salcobrand' (el cliente de consumo
-    masivo actual)."""
-    return "Farma" if "FARMA" in str(division).upper() else "Salcobrand"
+    Refresh: todo lo que contenga 'FARMA' -> 'Salcobrand' (el cliente farma
+    actual); cualquier otra division (Consumo Masivo, etc.) -> 'Consumo'."""
+    return "Salcobrand" if "FARMA" in str(division).upper() else "Consumo"
 
 
 def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes | None:
     """Genera el Excel de checklist de carga, con el mismo formato que usa
     Operaciones a mano en Google Sheets (título de cliente/división arriba,
     columna de verificación en blanco, numeración de carga): UNA pestaña
-    por división ('Farma' para Farma, 'Salcobrand' para el resto), con
+    por división ('Salcobrand' para Farma, 'Consumo' para el resto), con
     TODAS las OC de la semana (esten o no facturadas). Cada pestaña trae:
     - 'Carga OC': numeración correlativa 1..N DENTRO de esa pestaña, en el
       mismo orden cronológico (Fecha -> Ventana -> Prioridad) que ya trae
@@ -1501,10 +1500,6 @@ def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes 
     - 'Verificador': casillero en blanco para marcar a mano al cargar
       físicamente el camión (Excel/openpyxl no soporta checkboxes nativos,
       así que se deja un recuadro vacío con borde marcado).
-    - 'Camión': N° de camión de cada OC, y ademas cada vez que cambia de
-      camión respecto a la fila anterior se marca con un borde superior
-      grueso (reemplaza el rayado a mano que se hacía en Operaciones para
-      separar los camiones).
     - 'Facturada': 'Sí' / 'Parcial' / vacío si aún no se ha facturado.
     Devuelve None si no hay OC para mostrar."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -1525,26 +1520,17 @@ def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes 
         "Parcial": PatternFill("solid", fgColor="FDE3B8"),
     }
     thin = Side(style="thin", color="D9D9D9")
-    thick_top = Side(style="thick", color="1F2937")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     border_check = Border(
         left=Side(style="medium"), right=Side(style="medium"),
         top=Side(style="medium"), bottom=Side(style="medium"),
-    )
-    # Mismo borde de siempre, pero con el lado superior grueso: marca donde
-    # empieza un camion nuevo (reemplaza el rayado a mano que se hacia en
-    # Operaciones para separar los camiones dentro de la pestaña).
-    border_camion_nuevo = Border(left=thin, right=thin, top=thick_top, bottom=thin)
-    border_check_camion_nuevo = Border(
-        left=Side(style="medium"), right=Side(style="medium"),
-        top=thick_top, bottom=Side(style="medium"),
     )
     centrado = Alignment(horizontal="center", vertical="center")
 
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         hay_alguna_hoja = False
-        for pestana in ["Farma", "Salcobrand"]:
+        for pestana in ["Salcobrand", "Consumo"]:
             sub = d[d["_pestana"] == pestana].copy()
             if sub.empty:
                 continue
@@ -1556,8 +1542,8 @@ def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes 
 
             cols_orden = [
                 "Carga OC", "Verificador", "Pedido (OC)", "OC", "Día",
-                "Camión #", "Solicitado", "1 Posible", "Pronto-vence",
-                "Pallets", "# SKUs", "Campaña", "Facturada",
+                "Solicitado", "1 Posible", "Pronto-vence", "Pallets",
+                "# SKUs", "Campaña", "Facturada",
             ]
             cols_orden = [c for c in cols_orden if c in sub.columns]
             vista = sub[cols_orden].rename(columns={
@@ -1565,12 +1551,7 @@ def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes 
                 "1 Posible": "Posible actual",
                 "Pallets": "Pallet estimado",
                 "# SKUs": "líneas",
-                "Camión #": "Camión",
             })
-            # Lista paralela de N° de camion (misma fila a fila que 'vista')
-            # para poder marcar donde empieza cada camion nuevo, aunque la
-            # columna "Camión" no se termine mostrando.
-            camiones_fila = sub["Camión #"].tolist() if "Camión #" in sub.columns else [None] * len(sub)
 
             nombre_hoja = pestana[:31]
             vista.to_excel(writer, sheet_name=nombre_hoja, index=False, startrow=2)
@@ -1587,7 +1568,7 @@ def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes 
             c1.fill = titulo_fill
             ws.row_dimensions[1].height = 26
 
-            division_txt = "FARMA" if pestana == "Farma" else "CONSUMO MASIVO"
+            division_txt = "FARMA" if pestana == "Salcobrand" else "CONSUMO MASIVO"
             ws.merge_cells(f"A2:{ultima_letra}2")
             c2 = ws.cell(row=2, column=1, value=f"{division_txt} · Semana {semana}")
             c2.font = Font(bold=True, size=12, color="1F2937")
@@ -1605,22 +1586,18 @@ def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes 
 
             col_facturada = vista.columns.get_loc("Facturada") + 1 if "Facturada" in vista.columns else None
             col_verif = vista.columns.get_loc("Verificador") + 1 if "Verificador" in vista.columns else None
-            for i, r in enumerate(range(fila_header + 1, fila_header + n_filas + 1)):
+            for r in range(fila_header + 1, fila_header + n_filas + 1):
                 relleno_fila = None
                 if col_facturada:
                     val = ws.cell(row=r, column=col_facturada).value
                     relleno_fila = fact_fill.get(val)
-                # Nuevo camion = cambia el N° de camion respecto a la fila
-                # anterior (la primera fila de la pestaña no cuenta, ya que
-                # el encabezado ya la separa).
-                camion_nuevo = i > 0 and camiones_fila[i] != camiones_fila[i - 1]
                 for c in range(1, n_cols + 1):
                     cell = ws.cell(row=r, column=c)
                     cell.alignment = centrado
                     if col_verif and c == col_verif:
-                        cell.border = border_check_camion_nuevo if camion_nuevo else border_check
+                        cell.border = border_check
                     else:
-                        cell.border = border_camion_nuevo if camion_nuevo else border
+                        cell.border = border
                     if relleno_fila:
                         cell.fill = relleno_fila
 
@@ -3062,10 +3039,9 @@ def render_plan_hoja(archivo, cfg: dict):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key=f"btn_plan_{key_ns}",
             help="Todas las OC de la semana (facturadas o no), separadas en pestañas "
-                 "'Farma' y 'Salcobrand' (Consumo), con numeración de carga, día de "
-                 "despacho, N° de camión con línea de separación entre camiones y "
-                 "casillero de verificación, igual formato al que se usa a mano en "
-                 "Operaciones.",
+                 "'Salcobrand' (Farma) y 'Consumo', con numeración de carga, día de "
+                 "despacho y casillero de verificación, igual formato al que se usa "
+                 "a mano en Operaciones.",
         )
     else:
         st.info("No hay OC para armar el checklist de carga de esta semana.")
