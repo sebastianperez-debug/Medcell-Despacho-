@@ -224,19 +224,36 @@ HOJAS_CONFIG = {
         "dias_opciones": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"],
         "dias_default": ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes"],
         "usa_transportes": False, "n_transportes": None,
-        # Flota real: SOLO camiones de 13 pallets, con capacidad para hacer
-        # 2 vueltas por dia -> 6 ventanas/dia. Farma tiene un minimo
-        # garantizado de camiones por dia (flexible: solo si hay OC de Farma
-        # esperando ese dia). Si el total de camiones de 13 no alcanza en
-        # las ventanas disponibles de la semana, como ULTIMO RECURSO se
-        # fusionan (de a pares, empezando por los menos prioritarios y
-        # siempre dentro de la misma division) en ramplas de 27 pallets
-        # -> ver "capacidad_rescate" y _consolidar_con_rampla().
+        # Flota real: camiones de 13 pallets para Consumo Masivo, con
+        # capacidad para hacer 2 vueltas por dia -> 6 ventanas/dia. Farma
+        # tiene SU PROPIA flota, de camiones de 16 pallets (ver
+        # "capacidades_por_division" abajo), y un minimo garantizado de 2
+        # de esos camiones por dia (flexible: solo si hay OC de Farma
+        # esperando ese dia). Si el total de camiones de Consumo Masivo no
+        # alcanza en las ventanas disponibles de la semana, como ULTIMO
+        # RECURSO se fusionan (de a pares, empezando por los menos
+        # prioritarios y siempre dentro de la misma division) en ramplas de
+        # 27 pallets -> ver "capacidad_rescate" y _consolidar_con_rampla().
         "ventanas_por_dia_default": 6,
         "n_camiones_default": 3,
         "vueltas_por_camion_default": 2,
         "minimo_por_division": {"FARMA": 2},
+        "capacidades_por_division": {"FARMA": [16]},
+        # La rampla de 27 esta disponible para ambas divisiones (Consumo
+        # Masivo la usa mas seguido; Farma solo si algun dia le falta
+        # disponibilidad en sus 2 camiones de 16). Cuando se necesita una
+        # rampla, se intenta ubicar en Miercoles o Jueves primero (que es
+        # cuando en la practica se consigue ese transporte externo) -> ver
+        # "dias_preferidos_rampla" y asignar_ventanas().
+        "rescate_divisiones": {"CONSUMO MASIVO", "FARMA"},
+        "dias_preferidos_rampla": {"Miercoles", "Miércoles", "Jueves"},
         "capacidad_rescate": 27,
+        # Costos referenciales de flota (CLP). El camion normal (13 o 16
+        # pallets) cobra un valor FIJO que ya incluye hasta 2 vueltas ese
+        # dia (se haga 1 o 2, se paga igual); la rampla se cobra por vuelta,
+        # y en este modelo siempre corresponde a 1 vuelta por rampla usada.
+        "costo_camion": 170000,
+        "costo_rampla": 270000,
         # Para SB el calculo de pallets SIEMPRE usa "Pallets Pos." (columna
         # AH del Refresh): no se ofrece alternativa en la UI para evitar que
         # alguien elija sin querer una columna distinta y el numero de
@@ -386,9 +403,12 @@ def resumen_directos(df_directos: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if df_directos.empty:
         return df_directos
     cols = [cfg["pedido"], cfg["oc"], cfg["fecha_vence"], cfg["sku"],
-            cfg["descripcion"], cfg["directos"], cfg["solicitado"]]
+            cfg["descripcion"], cfg["directos"], cfg["solicitado"], cfg["solicitado_dolar"]]
     cols = [c for c in cols if c in df_directos.columns]
-    return df_directos[cols].rename(columns={cfg["directos"]: "Proveedor directo"})
+    return df_directos[cols].rename(columns={
+        cfg["directos"]: "Proveedor directo",
+        cfg["solicitado_dolar"]: "Monto",
+    })
 
 
 def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str, cfg: dict) -> pd.DataFrame:
@@ -489,7 +509,9 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
                     orden_prioridad: list[int], dias: list[str] | None = None,
                     ventanas_por_dia: int | None = None,
                     minimo_por_division: dict | None = None,
-                    capacidad_rescate: int | None = None) -> list[dict]:
+                    capacidad_rescate: int | None = None,
+                    capacidades_por_division: dict | None = None,
+                    rescate_divisiones: set | None = None) -> list[dict]:
     """Arma camiones respetando 2 reglas duras:
     1) una OC nunca se parte entre camiones.
     2) Farma y Consumo Masivo NUNCA van en el mismo camion -> se empacan por
@@ -505,16 +527,30 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
     fusiona nada aca (esa OC ya va sola, no se puede partir), solo se busca
     el tipo de vehiculo mas chico que igual le alcance. La fusion real de
     VARIOS camiones chicos en una rampla (el "ultimo recurso" cuando no
-    alcanzan las ventanas de la semana) la hace _consolidar_con_rampla."""
-    cap_max = max(capacidades)
+    alcanzan las ventanas de la semana) la hace _consolidar_con_rampla.
 
-    def cerrar(b):
+    capacidades_por_division (opcional, ej: {"FARMA": [16]}) le da a una
+    division su PROPIA flota de capacidades, distinta de `capacidades`
+    (que se sigue usando tal cual para cualquier otra division que no
+    aparezca en el dict). Asi Farma puede despachar en camiones de 16
+    pallets mientras Consumo Masivo sigue con los de 13 (+ rampla de
+    rescate de 27), sin que una flota interfiera con la otra.
+
+    rescate_divisiones (opcional, ej: {"CONSUMO MASIVO"}): si se entrega,
+    la rampla de rescate SOLO se ofrece como opcion para esas divisiones
+    (una division con flota propia, como Farma con sus camiones de 16, no
+    tiene por que compartir la rampla externa de Consumo Masivo). Si se
+    omite, el rescate queda disponible para todas las divisiones (mismo
+    comportamiento que antes)."""
+    capacidades_por_division = capacidades_por_division or {}
+
+    def cerrar(b, capacidades_local, rescate_local):
         # El total del camion (suma de fragmentos, algunos fraccionarios) se
         # redondea HACIA ARRIBA reci�n aca, al cerrar el camion -- asi varios
         # fragmentos chicos (ej: 0.5 + 0.5) pueden compartir un mismo pallet
         # fisico en vez de que cada uno redondee a 1 por separado.
         b["total"] = math.ceil(round(b["total"], 6))
-        opciones = sorted(set(capacidades) | ({capacidad_rescate} if capacidad_rescate else set()))
+        opciones = sorted(set(capacidades_local) | ({rescate_local} if rescate_local else set()))
         for cap in opciones:
             if b["total"] <= cap:
                 b["camion"] = cap
@@ -525,24 +561,25 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
         b["camion"] = b["total"]
         return b
 
-    def empacar(items):
+    def empacar(items, capacidades_local, rescate_local):
+        cap_max_local = max(capacidades_local)
         items = sorted(items, key=lambda x: (orden_prioridad.index(x["prioridad"]), -x["pallets_empaque"]))
         bins_local, actual = [], {"items": [], "total": 0.0}
         for it in items:
-            if it["pallets_empaque"] > cap_max:
+            if it["pallets_empaque"] > cap_max_local:
                 if actual["items"]:
-                    bins_local.append(cerrar(actual))
+                    bins_local.append(cerrar(actual, capacidades_local, rescate_local))
                     actual = {"items": [], "total": 0.0}
-                bins_local.append(cerrar({"items": [it], "total": it["pallets_empaque"]}))
+                bins_local.append(cerrar({"items": [it], "total": it["pallets_empaque"]}, capacidades_local, rescate_local))
                 continue
-            if actual["total"] + it["pallets_empaque"] <= cap_max:
+            if actual["total"] + it["pallets_empaque"] <= cap_max_local:
                 actual["items"].append(it)
                 actual["total"] += it["pallets_empaque"]
             else:
-                bins_local.append(cerrar(actual))
+                bins_local.append(cerrar(actual, capacidades_local, rescate_local))
                 actual = {"items": [it], "total": it["pallets_empaque"]}
         if actual["items"]:
-            bins_local.append(cerrar(actual))
+            bins_local.append(cerrar(actual, capacidades_local, rescate_local))
         return bins_local
 
     agg = agg.copy()
@@ -552,7 +589,9 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
         items = sub.to_dict("records")
         for it in items:
             it["division"] = division
-        bins_dv = empacar(items)
+        capacidades_local = capacidades_por_division.get(division, capacidades)
+        rescate_local = capacidad_rescate if (rescate_divisiones is None or division in rescate_divisiones) else None
+        bins_dv = empacar(items, capacidades_local, rescate_local)
         for b in bins_dv:
             b["division"] = division
         bins_por_division[division] = bins_dv
@@ -632,14 +671,22 @@ def _rellenar_ramplas_con_sobrantes(bins_por_division: dict, capacidad_rescate: 
 
 
 def _consolidar_con_rampla(bins: list[dict], ventanas_disponibles: int,
-                            capacidad_rescate: int) -> list[dict]:
-    """Ultimo recurso cuando los camiones normales (13 pallets) no alcanzan
-    a caber en las ventanas disponibles de la semana (dias x ventanas/dia):
-    fusiona camiones de a pares -SIEMPRE dentro de la misma division, nunca
+                            capacidad_rescate: int,
+                            divisiones_elegibles: set | None = None) -> list[dict]:
+    """Ultimo recurso cuando los camiones normales no alcanzan a caber en
+    las ventanas disponibles de la semana (dias x ventanas/dia): fusiona
+    camiones de a pares -SIEMPRE dentro de la misma division, nunca
     partiendo una OC- en ramplas de 'capacidad_rescate' pallets (27),
     empezando por los camiones MENOS prioritarios (el final de la lista,
     que ya viene ordenada de mas a menos urgente), hasta que el plan quepa
     en las ventanas disponibles o ya no queden pares fusionables.
+
+    divisiones_elegibles (opcional, ej: {"CONSUMO MASIVO"}): si se entrega,
+    solo se fusionan camiones de esas divisiones. Una division con flota
+    propia y sin rampla de respaldo (como Farma, que solo tiene camiones de
+    16) queda afuera: si le faltan ventanas, sus camiones quedan igual como
+    overflow / "SIN VENTANA" en vez de subirse a una rampla que en la
+    realidad no existe para esa division.
 
     Si aun asi sobran camiones (division muy desbalanceada, por ejemplo),
     esos quedan igual que antes: como overflow / "SIN VENTANA" en
@@ -653,6 +700,8 @@ def _consolidar_con_rampla(bins: list[dict], ventanas_disponibles: int,
         cambiado = False
         for i in range(len(bins) - 1, 0, -1):
             b2 = bins[i]
+            if divisiones_elegibles is not None and b2["division"] not in divisiones_elegibles:
+                continue
             for j in range(i - 1, -1, -1):
                 b1 = bins[j]
                 if (b1["division"] == b2["division"]
@@ -670,7 +719,9 @@ def _consolidar_con_rampla(bins: list[dict], ventanas_disponibles: int,
 
 def asignar_ventanas(bins: list[dict], semana: int, anio: int,
                       dias: list[str], ventanas_por_dia: int,
-                      usa_transportes: bool = False, n_transportes: int = 3):
+                      usa_transportes: bool = False, n_transportes: int = 3,
+                      capacidad_rescate: int | None = None,
+                      dias_preferidos_rampla: set | None = None):
     """Genera los "slots" (dia + ventana) donde se ubica cada camion.
 
     Modo normal (SB): dias x ventanas_por_dia es un tope fijo; si sobran
@@ -679,7 +730,15 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
     Modo transportes (PU): no hay tope de ventanas por dia. Los camiones se
     reparten ciclicamente entre n_transportes hasta completar TODO el
     despacho ese dia (nunca hay overflow, cada transporte hace las vueltas
-    que se necesiten)."""
+    que se necesiten).
+
+    Si se entrega capacidad_rescate, cualquier camion que haya quedado con
+    ese tamano (una rampla) intenta ubicarse PRIMERO en dias_preferidos_rampla
+    (por defecto Miercoles/Jueves, que es cuando en la practica se consigue
+    ese transporte externo). Si esos dias no tienen cupo o no estan dentro
+    de los dias habilitados esa semana, la rampla igual se despacha, solo
+    que cae en el resto de los dias como antes. El resto de los camiones
+    (no-rampla) rellenan los cupos que van quedando, en orden de dia."""
     lunes = datetime.date.fromisocalendar(anio, semana, 1)
     dia_offset = {"Lunes": 0, "Martes": 1, "Miercoles": 2, "Miércoles": 2,
                   "Jueves": 3, "Viernes": 4, "Sabado": 5, "Sábado": 5, "Domingo": 6}
@@ -694,6 +753,7 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
             fecha = lunes + datetime.timedelta(days=dia_offset.get(d, 0))
             slots.append({"dia": d, "fecha": fecha, "ventana": f"Transporte {t}"})
         overflow = False
+        asignacion = {i: i for i in range(len(bins))}
     else:
         slots = []
         for d in dias:
@@ -702,8 +762,34 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
                 slots.append({"dia": d, "fecha": fecha, "ventana": v})
         overflow = len(bins) > len(slots)
 
+        if capacidad_rescate:
+            dias_pref = dias_preferidos_rampla or {"Miercoles", "Miércoles", "Jueves"}
+            idx_pref = [i for i, s in enumerate(slots) if s["dia"] in dias_pref]
+            idx_resto = [i for i, s in enumerate(slots) if s["dia"] not in dias_pref]
+
+            asignacion = {}
+            # 1) las ramplas (en el orden de prioridad que ya traian) se
+            # ubican primero en los dias preferidos; si se acaban, siguen
+            # con el resto de los dias en orden.
+            for i, b in enumerate(bins):
+                if b.get("camion") == capacidad_rescate:
+                    if idx_pref:
+                        asignacion[i] = idx_pref.pop(0)
+                    elif idx_resto:
+                        asignacion[i] = idx_resto.pop(0)
+            # 2) el resto de los camiones (no-rampla) rellenan los cupos que
+            # vayan quedando, respetando el orden cronologico de dia/ventana.
+            libres = sorted(idx_pref + idx_resto)
+            for i, b in enumerate(bins):
+                if i not in asignacion:
+                    if libres:
+                        asignacion[i] = libres.pop(0)
+        else:
+            asignacion = {i: i for i in range(len(bins)) if i < len(slots)}
+
     for i, b in enumerate(bins):
-        slot = slots[i] if i < len(slots) else {"dia": "SIN VENTANA", "fecha": None, "ventana": "-"}
+        slot_idx = asignacion.get(i)
+        slot = slots[slot_idx] if slot_idx is not None else {"dia": "SIN VENTANA", "fecha": None, "ventana": "-"}
         b.update(slot)
         b["camion_num"] = i + 1
         for it in b["items"]:
@@ -735,16 +821,23 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
         agg, capacidades, orden_prioridad, dias=dias, ventanas_por_dia=ventanas_por_dia,
         minimo_por_division=cfg.get("minimo_por_division"),
         capacidad_rescate=capacidad_rescate,
+        capacidades_por_division=cfg.get("capacidades_por_division"),
+        rescate_divisiones=cfg.get("rescate_divisiones"),
     )
 
     if capacidad_rescate and not cfg.get("usa_transportes", False):
         ventanas_disponibles = len(dias) * ventanas_por_dia
-        bins = _consolidar_con_rampla(bins, ventanas_disponibles, capacidad_rescate)
+        bins = _consolidar_con_rampla(
+            bins, ventanas_disponibles, capacidad_rescate,
+            divisiones_elegibles=cfg.get("rescate_divisiones"),
+        )
 
     bins, slots, overflow = asignar_ventanas(
         bins, semana, anio, dias, ventanas_por_dia,
         usa_transportes=cfg.get("usa_transportes", False),
         n_transportes=cfg.get("n_transportes", 3),
+        capacidad_rescate=capacidad_rescate,
+        dias_preferidos_rampla=cfg.get("dias_preferidos_rampla"),
     )
 
     resumen = pd.DataFrame([{
@@ -754,6 +847,7 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
         "Pallets cargados": round(b["total"], 2), "Capacidad": b["camion"],
         "Utilización %": round(b["total"] / b["camion"] * 100, 1),
         "# OCs": len(b["items"]),
+        "# SKUs": sum(it.get("n_sku", 0) for it in b["items"]),
         "Pedidos incluidos": ", ".join(str(it["Pedido"]) for it in b["items"]),
     } for b in bins])
 
@@ -779,16 +873,20 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
     return resumen, detalle, info, tabla_directos
 
 
-def _resaltar_facturado_factory(cap_max: float | None = None):
+def _resaltar_facturado_factory(cap_max: float | None = None, cap_por_division: dict | None = None):
     """Devuelve una función de estilo por fila para el .style.apply() de la
-    tabla 'Detalle por OC'. Si cap_max viene informado, cualquier OC cuyos
+    tabla 'Detalle por OC'. Si cap_max (o cap_por_division, para la
+    división de esa fila puntual) viene informado, cualquier OC cuyos
     Pallets superen esa capacidad máxima de transporte disponible se pinta
     de rojo oscuro (tiene prioridad visual por sobre Facturado/Parcial,
     porque esa OC no puede despacharse tal como está — hay que corregirla
     o dividirla)."""
+    cap_por_division = cap_por_division or {}
+
     def _fn(row):
         estado = row.get("Facturado")
-        excede = cap_max is not None and row.get("Pallets", 0) > cap_max
+        cap_row = cap_por_division.get(row.get("División"), cap_max)
+        excede = cap_row is not None and row.get("Pallets", 0) > cap_row
         if excede:
             style = "background-color: #5C0A0A; color: #FFD9D9; font-weight: 700"
         elif estado == "Sí":
@@ -870,10 +968,11 @@ def render_leyenda_calendario():
 
 
 def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None,
-                       cap_max: float | None = None):
+                       cap_max: float | None = None, cap_por_division: dict | None = None):
     """Vista tipo calendario/kanban: una columna por dia, con un KPI de
     despacho arriba (camiones, utilizacion y Facturados vs No) y tarjetas por
     OC con Pedido, OC, Monto y Pallets."""
+    cap_por_division = cap_por_division or {}
     if detalle.empty:
         st.info("No hay OC para mostrar en el calendario.")
         return
@@ -958,7 +1057,8 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                     )
                     st.markdown(ventana_html, unsafe_allow_html=True)
                     for _, row in sub_v.sort_values("Prioridad").iterrows():
-                        excede = cap_max is not None and row["Pallets"] > cap_max
+                        cap_row = cap_por_division.get(row.get("División"), cap_max)
+                        excede = cap_row is not None and row["Pallets"] > cap_row
                         color = "#5C0A0A" if excede else _COLOR_PRIORIDAD.get(row["Prioridad"], "#888888")
                         if row["Facturado"] == "Sí":
                             chip = (
@@ -981,7 +1081,7 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                             "border-radius:4px;padding:0.2rem 0.5rem;margin-top:0.35rem;"
                             "font-size:0.68rem;font-weight:700;color:#FF8A80;"
                             "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>"
-                            f"⚠️ EXCEDE CAPACIDAD ({cap_max:.0f} pal máx.) — Cancelar OC"
+                            f"⚠️ EXCEDE CAPACIDAD ({cap_row:.0f} pal máx.) — Cancelar OC"
                             "</div>"
                         ) if excede else ""
                         tarjeta_html = (
@@ -1005,15 +1105,19 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                         st.markdown(tarjeta_html, unsafe_allow_html=True)
 
 
-def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame, cap_max: float | None = None):
+def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame,
+                           cap_max: float | None = None, cap_por_division: dict | None = None):
     """Tabla 'Plan de camiones' en HTML (para poder pintar en verde, dentro
     de la misma celda, los numeros de Pedido que ya estan Facturados) mas
-    una columna extra de % Facturado por camion. Si cap_max viene informado,
-    las filas/pedidos que superan esa capacidad maxima real se pintan en
-    rojo para detectarlas al toque (ese "camion" es ficticio: el sistema le
-    puso el tamaño de la OC porque no entraba en ningun transporte real)."""
+    una columna extra de % Facturado por camion. Si cap_max (o, para cada
+    fila, cap_por_division segun su División) viene informado, las
+    filas/pedidos que superan esa capacidad maxima real se pintan en rojo
+    para detectarlas al toque (ese "camion" es ficticio: el sistema le puso
+    el tamaño de la OC porque no entraba en ningun transporte real)."""
+    cap_por_division = cap_por_division or {}
     facturado_map = dict(zip(detalle["Pedido (OC)"].astype(str), detalle["Facturado"]))
     pallets_map = dict(zip(detalle["Pedido (OC)"].astype(str), detalle["Pallets"]))
+    division_map = dict(zip(detalle["Pedido (OC)"].astype(str), detalle["División"]))
 
     cols_base = ["Camión #", "Día", "Fecha", "Ventana", "División",
                  "Tipo camión (pallets)", "Pallets cargados", "Capacidad",
@@ -1026,10 +1130,12 @@ def render_tabla_camiones(resumen: pd.DataFrame, detalle: pd.DataFrame, cap_max:
         pedidos = [p.strip() for p in str(row["Pedidos incluidos"]).split(",") if p.strip()]
         n_fact = sum(1 for p in pedidos if facturado_map.get(p) == "Sí")
         pct_fact = (n_fact / len(pedidos) * 100) if pedidos else 0
-        camion_excede = cap_max is not None and row["Tipo camión (pallets)"] > cap_max
+        cap_fila = cap_por_division.get(row.get("División"), cap_max)
+        camion_excede = cap_fila is not None and row["Tipo camión (pallets)"] > cap_fila
 
         def _chip(p):
-            excede_p = cap_max is not None and pallets_map.get(p, 0) > cap_max
+            cap_p = cap_por_division.get(division_map.get(p), cap_max)
+            excede_p = cap_p is not None and pallets_map.get(p, 0) > cap_p
             estado = facturado_map.get(p)
             if excede_p:
                 return (f"<span style='background:#5C0A0A;color:#FFD9D9;font-weight:700;"
@@ -2155,6 +2261,182 @@ def render_stock(df_stock_raw, key_ns: str = "stock", titulo: str = "📦 Dashbo
 
 
 
+def calcular_costos_flota(resumen: pd.DataFrame, cfg: dict, vueltas_por_camion: int) -> dict | None:
+    """Estima el costo de la flota usada esta semana:
+    - camion normal: valor FIJO (cfg['costo_camion']) que ya cubre hasta
+      'vueltas_por_camion' vueltas ese dia (se pague 1 o 2 vueltas, el costo
+      es el mismo) -> el numero de camiones FISICOS por dia es
+      ceil(ventanas_normales_usadas_ese_dia / vueltas_por_camion).
+    - rampla: valor por vuelta (cfg['costo_rampla']), y en este modelo cada
+      rampla que aparece en el plan corresponde a 1 vuelta.
+    Devuelve None si a la hoja le faltan los valores de costo en cfg."""
+    costo_camion = cfg.get("costo_camion")
+    costo_rampla = cfg.get("costo_rampla")
+    capacidad_rescate = cfg.get("capacidad_rescate")
+    if not (costo_camion and costo_rampla and capacidad_rescate):
+        return None
+
+    vpc = max(1, int(vueltas_por_camion or 1))
+    es_rampla = resumen["Tipo camión (pallets)"] == capacidad_rescate
+    resumen_rampla = resumen[es_rampla]
+    resumen_normal = resumen[~es_rampla]
+
+    n_ramplas = int(len(resumen_rampla))
+    camiones_por_dia = (
+        resumen_normal.groupby("Día").size().apply(lambda n: math.ceil(n / vpc))
+        if not resumen_normal.empty else pd.Series(dtype=int)
+    )
+    n_camiones_fisicos = int(camiones_por_dia.sum())
+
+    costo_camiones_total = n_camiones_fisicos * costo_camion
+    costo_ramplas_total = n_ramplas * costo_rampla
+
+    return {
+        "n_camiones_fisicos": n_camiones_fisicos,
+        "costo_camiones_total": costo_camiones_total,
+        "n_ramplas": n_ramplas,
+        "costo_ramplas_total": costo_ramplas_total,
+        "costo_total": costo_camiones_total + costo_ramplas_total,
+        "ramplas_por_dia": resumen_rampla["Día"].value_counts().to_dict(),
+    }
+
+
+def render_kpis_avanzados(resumen: pd.DataFrame, detalle: pd.DataFrame,
+                           tabla_directos: pd.DataFrame, cfg: dict,
+                           vueltas_por_camion: int, dias_orden: list[str], key_ns: str):
+    """Bloque de KPIs/gráficos adicionales: costo de flota (camión vs
+    rampla), monto y cantidad de OC por categoría, OC en riesgo por
+    vencimiento, carga por día y complejidad de picking (SKUs/camión)."""
+
+    # --- 1) Costo de flota (camiones vs ramplas) ---------------------------
+    costos = calcular_costos_flota(resumen, cfg, vueltas_por_camion)
+    if costos:
+        st.markdown("##### 💰 Costo estimado de flota")
+        dias_pref = cfg.get("dias_preferidos_rampla") or set()
+        ramplas_pref = sum(v for d, v in costos["ramplas_por_dia"].items() if d in dias_pref)
+        ramplas_otros = costos["n_ramplas"] - ramplas_pref
+        render_kpi_cards([
+            {"value": costos["n_camiones_fisicos"], "label": "Camiones físicos usados",
+             "badge_text": formato_clp(costos["costo_camiones_total"]), "badge_color": "#3B9EFF"},
+            {"value": costos["n_ramplas"], "label": "Ramplas usadas",
+             "badge_text": formato_clp(costos["costo_ramplas_total"]),
+             "badge_color": "#E4572E" if costos["n_ramplas"] else "#1DB980"},
+            {"value": f"{ramplas_pref}/{costos['n_ramplas']}", "label": "Ramplas en día preferido",
+             "badge_text": "Miér./Jue." if dias_pref else None, "badge_color": "#1DB980"},
+            {"value": formato_clp(costos["costo_total"]), "label": "Costo total flota semana"},
+        ])
+        if costos["ramplas_por_dia"]:
+            detalle_dias = ", ".join(f"{d}: {n}" for d, n in sorted(
+                costos["ramplas_por_dia"].items(),
+                key=lambda kv: dias_orden.index(kv[0]) if kv[0] in dias_orden else 99))
+            st.caption(f"🆘 Ramplas por día → {detalle_dias}."
+                       + (f" ⚠️ {ramplas_otros} fuera de Miércoles/Jueves." if ramplas_otros else ""))
+
+    # --- 2) Monto y cantidad de OC por categoría ---------------------------
+    st.markdown("##### 📦 OC y monto por categoría")
+    if "Monto" in detalle.columns:
+        filas = []
+        total_oc, total_fact, total_pend = 0, 0.0, 0.0
+        for div, sub in detalle.groupby("División"):
+            n_oc = sub["Pedido (OC)"].nunique()
+            m_fact = sub.loc[sub["Facturado"] == "Sí", "Monto"].sum()
+            m_pend = sub.loc[sub["Facturado"] != "Sí", "Monto"].sum()
+            filas.append({"Categoría": div, "# OC": n_oc,
+                          "Monto facturado": m_fact, "Monto pendiente": m_pend})
+            total_oc += n_oc
+            total_fact += m_fact
+            total_pend += m_pend
+        n_oc_directo = tabla_directos["Pedido"].nunique() if not tabla_directos.empty else 0
+        m_directo = tabla_directos["Monto"].sum() if ("Monto" in tabla_directos.columns and not tabla_directos.empty) else 0.0
+        filas.append({"Categoría": "DIRECTOS (no van en camión)", "# OC": n_oc_directo,
+                      "Monto facturado": None, "Monto pendiente": m_directo})
+        filas.insert(0, {"Categoría": "TOTAL (camión + directos)", "# OC": total_oc + n_oc_directo,
+                         "Monto facturado": total_fact, "Monto pendiente": total_pend + m_directo})
+        df_cat = pd.DataFrame(filas)
+        st.dataframe(
+            df_cat.style.format({"Monto facturado": lambda v: formato_clp(v) if pd.notna(v) else "—",
+                                 "Monto pendiente": lambda v: formato_clp(v) if pd.notna(v) else "—"}),
+            use_container_width=True, hide_index=True,
+        )
+
+    # --- 3) OC en riesgo por vencimiento, aún sin facturar ------------------
+    st.markdown("##### ⏰ OC en riesgo por vencimiento (sin facturar)")
+    det_pend = detalle[detalle["Facturado"] != "Sí"].copy()
+    det_pend["_venc"] = pd.to_datetime(det_pend["Fecha vence"], errors="coerce")
+    det_pend = det_pend.dropna(subset=["_venc"])
+    hoy = pd.Timestamp(datetime.date.today())
+    det_pend["Días para vencer"] = (det_pend["_venc"] - hoy).dt.days
+    riesgo = det_pend[det_pend["Días para vencer"] <= 7].sort_values("Días para vencer")
+    if riesgo.empty:
+        st.success("✅ Ninguna OC pendiente vence en los próximos 7 días.")
+    else:
+        monto_riesgo = riesgo["Monto"].sum() if "Monto" in riesgo.columns else 0
+        n_vencidas = int((riesgo["Días para vencer"] < 0).sum())
+        render_kpi_cards([
+            {"value": len(riesgo), "label": "OC en riesgo (≤7 días, sin facturar)"},
+            {"value": n_vencidas, "label": "Ya vencidas",
+             "badge_text": "Revisar ya" if n_vencidas else None, "badge_color": "#E4572E"},
+            {"value": formato_clp(monto_riesgo), "label": "Monto en riesgo"},
+        ])
+        cols_riesgo = ["Pedido (OC)", "División", "Prioridad", "Fecha vence",
+                       "Días para vencer", "Monto", "Facturado"]
+        cols_riesgo = [c for c in cols_riesgo if c in riesgo.columns]
+        st.dataframe(
+            riesgo[cols_riesgo].style.format({"Monto": lambda v: formato_clp(v)}),
+            use_container_width=True, hide_index=True,
+        )
+
+    # --- 4) Carga por día (pallets cargados vs capacidad, por división) ----
+    st.markdown("##### 📊 Carga por día")
+    resumen_dia = resumen[resumen["Día"] != "SIN VENTANA"].copy()
+    if not resumen_dia.empty:
+        resumen_dia["Día"] = pd.Categorical(resumen_dia["Día"], categories=dias_orden, ordered=True)
+        grp = resumen_dia.groupby(["Día", "División"], observed=True).agg(
+            **{"Pallets cargados": ("Pallets cargados", "sum"), "Capacidad total": ("Capacidad", "sum")}
+        ).reset_index()
+        fig_carga = px.bar(
+            grp, x="Día", y="Pallets cargados", color="División",
+            barmode="stack", text_auto=",.0f",
+        )
+        cap_dia = resumen_dia.groupby("Día", observed=True)["Capacidad"].sum().reset_index()
+        fig_carga.add_trace(go.Scatter(
+            x=cap_dia["Día"], y=cap_dia["Capacidad"], mode="lines+markers",
+            name="Capacidad disponible", line=dict(dash="dot", color="#F2C94C"),
+        ))
+        fig_carga.update_layout(
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(t=10, b=10, l=10, r=10), height=340, yaxis_title="Pallets",
+        )
+        st.plotly_chart(fig_carga, use_container_width=True, key=f"carga_dia_{key_ns}")
+
+    # --- 5) Complejidad de picking (SKUs por camión) ------------------------
+    if "# SKUs" in resumen.columns:
+        st.markdown("##### 🧩 Complejidad de picking (SKUs por camión)")
+        prom_sku = resumen["# SKUs"].mean()
+        umbral = prom_sku + 1.5 * resumen["# SKUs"].std(ddof=0) if len(resumen) > 1 else prom_sku
+        n_complejos = int((resumen["# SKUs"] > umbral).sum())
+        render_kpi_cards([
+            {"value": f"{prom_sku:.1f}", "label": "SKUs promedio por camión"},
+            {"value": n_complejos, "label": "Camiones de picking complejo",
+             "badge_text": f"> {umbral:.0f} SKUs" if n_complejos else None, "badge_color": "#E4572E"},
+        ])
+        top_sku = resumen.sort_values("# SKUs", ascending=False).head(10).sort_values("# SKUs")
+        etiqueta = "Camión " + top_sku["Camión #"].astype(str) + " (" + top_sku["Día"].astype(str) + ", " + top_sku["División"].astype(str) + ")"
+        fig_sku = px.bar(
+            top_sku.assign(_etiqueta=etiqueta), x="# SKUs", y="_etiqueta", orientation="h",
+            text_auto=",.0f",
+            color=(top_sku["# SKUs"] > umbral).map({True: "Complejo", False: "Normal"}),
+            color_discrete_map={"Complejo": "#E4572E", "Normal": "#3B9EFF"},
+        )
+        fig_sku.update_traces(textfont_size=11, textposition="outside", cliponaxis=False)
+        fig_sku.update_layout(
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(t=10, b=10, l=10, r=10), height=320, xaxis_title="", yaxis_title="",
+            legend_title="",
+        )
+        st.plotly_chart(fig_sku, use_container_width=True, key=f"sku_camion_{key_ns}")
+
+
 def render_plan_hoja(archivo, cfg: dict):
     """Cuerpo completo del plan de despacho (KPIs, camiones, calendario,
     tabla, exportables) para UNA hoja del Refresh (SB o PU). key_ns evita que
@@ -2180,6 +2462,7 @@ def render_plan_hoja(archivo, cfg: dict):
 
     opciones_pallets = [cfg["pallets_pos"]] + ([cfg["pallets_alt"]] if cfg["pallets_alt"] else [])
 
+    vueltas_por_camion = 1  # default para hojas sin concepto de "vueltas" (ej: PU)
     with st.sidebar:
         st.markdown(f"### ⚙️ Configuración — {cfg['hoja']}")
         if cfg.get("forzar_pallet_col"):
@@ -2241,14 +2524,23 @@ def render_plan_hoja(archivo, cfg: dict):
                 min_value=1, key=f"ventanas_{key_ns}",
             )
         if cfg.get("capacidad_rescate"):
+            rescate_div_txt = (
+                ", ".join(sorted(cfg["rescate_divisiones"])) if cfg.get("rescate_divisiones") else "todas las divisiones"
+            )
             st.caption(
                 f"🚛 Camiones normales de {cfg['capacidades_default'][0]} pallets. Si el total "
                 f"de camiones no alcanza en las ventanas disponibles de la semana "
                 f"({len(dias)} días × {ventanas_por_dia} ventanas) -es decir, no alcanza la "
                 f"cubicación para despachar todo-, como ÚLTIMO RECURSO se fusionan los "
                 f"camiones menos prioritarios (misma división) en ramplas de "
-                f"{cfg['capacidad_rescate']} pallets."
+                f"{cfg['capacidad_rescate']} pallets. Aplica solo a: {rescate_div_txt}."
             )
+        if cfg.get("capacidades_por_division"):
+            flota_txt = "; ".join(
+                f"{div}: camiones de {'/'.join(str(c) for c in caps)} pallets"
+                for div, caps in cfg["capacidades_por_division"].items()
+            )
+            st.caption(f"🚚 Flota propia por división — {flota_txt}.")
         if cfg["hoja"] == "PU":
             st.caption("📌 PU no se distribuye durante la semana: por defecto solo se "
                        "despacha el Viernes (ajustable arriba). Incluye rampla de 27 pallets. "
@@ -2328,6 +2620,11 @@ def render_plan_hoja(archivo, cfg: dict):
         st.error("⚠️ No alcanzan las ventanas de la semana para todos los camiones "
                   "necesarios. Suma días/ventanas o revisa las capacidades.")
 
+    with st.expander("📈 KPIs y análisis adicionales", expanded=True):
+        dias_orden = [d for d in cfg["dias_opciones"] if d in dias]
+        render_kpis_avanzados(resumen, detalle, tabla_directos, cfg,
+                               vueltas_por_camion, dias_orden, key_ns)
+
     excel_pendientes = exportar_pendientes_excel(detalle)
     col_desc_a, col_desc_b = st.columns(2)
     with col_desc_a:
@@ -2362,6 +2659,16 @@ def render_plan_hoja(archivo, cfg: dict):
     cap_max = max(list(capacidades) + ([cfg["capacidad_rescate"]] if cfg.get("capacidad_rescate") else [])) \
         if capacidades else cfg.get("capacidad_rescate")
 
+    # Algunas divisiones tienen su PROPIA flota (ej: Farma, con camiones de
+    # 16 pallets propios, sin acceso a la rampla de rescate de Consumo
+    # Masivo) -> su tope real de "OC individual demasiado grande" es
+    # distinto al cap_max general. Se arma un tope por división para que el
+    # aviso rojo de "excede capacidad" sea correcto para cada una.
+    cap_por_division = {}
+    for div, caps_div in (cfg.get("capacidades_por_division") or {}).items():
+        rescate_div = cfg.get("capacidad_rescate") if div in (cfg.get("rescate_divisiones") or set()) else None
+        cap_por_division[div] = max(list(caps_div) + ([rescate_div] if rescate_div else []))
+
     st.subheader("Detalle por OC (van en camión)")
     busqueda_oc = st.text_input(
         "🔍 Buscar por N° de Pedido o de OC",
@@ -2391,13 +2698,13 @@ def render_plan_hoja(archivo, cfg: dict):
     with tab_calendario:
         st.caption("Una columna por día, tarjetas con Pedido, OC, Monto y Pallets — "
                    "ordenadas por ventana y prioridad.")
-        render_calendario(detalle_vista, resumen, cap_max)
+        render_calendario(detalle_vista, resumen, cap_max, cap_por_division)
     with tab_tabla:
         st.caption("Verde = 100% Facturado, naranjo = despacho Parcial (según la pestaña OC del Refresh). "
                     "Rojo oscuro = la OC por sí sola supera la capacidad máxima de transporte disponible "
                     f"({cap_max:.0f} pal) y debe revisarse." if cap_max else "")
         st.dataframe(
-            detalle_vista.style.apply(_resaltar_facturado_factory(cap_max), axis=1).format({
+            detalle_vista.style.apply(_resaltar_facturado_factory(cap_max, cap_por_division), axis=1).format({
                 "Pallets": "{:.0f}", "Monto": lambda v: formato_clp(v),
             }),
             use_container_width=True, hide_index=True,
@@ -2406,7 +2713,7 @@ def render_plan_hoja(archivo, cfg: dict):
     st.subheader("Plan de camiones")
     st.caption("Verde = 100% Facturado, naranjo = despacho Parcial. "
                "La columna % Facturado indica qué proporción de ese camión ya se despachó al 100%.")
-    render_tabla_camiones(resumen, detalle, cap_max)
+    render_tabla_camiones(resumen, detalle, cap_max, cap_por_division)
 
     if not tabla_directos.empty:
         st.subheader("Directos (información, NO ocupan camión/ventana)")
