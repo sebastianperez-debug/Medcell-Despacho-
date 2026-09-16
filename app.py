@@ -3054,6 +3054,30 @@ def render_plan_hoja(archivo, cfg: dict):
         else:
             st.success("✅ Todas las OC de esta semana ya aparecen como Facturadas.")
 
+    with st.expander("🔍 Conteo de control (para verificar diferencias de OC)"):
+        df_semana_raw = df[df[cfg["semana"]] == semana]
+        n_filas_crudas = len(df_semana_raw)
+        n_oc_unicas = df_semana_raw[cfg["pedido"]].nunique()
+        _df_cam_ctrl, _df_dir_ctrl = separar_directos(df, semana, cfg)
+        oc_camion_ctrl = set(_df_cam_ctrl[cfg["pedido"]].unique())
+        oc_directos_ctrl = set(_df_dir_ctrl[cfg["pedido"]].unique())
+        oc_100_directas = oc_directos_ctrl - oc_camion_ctrl
+        oc_mixtas = oc_directos_ctrl & oc_camion_ctrl
+        st.markdown(
+            f"- Filas crudas de la hoja **{cfg['hoja']}** en la semana {semana} "
+            f"(1 fila por producto/SKU): **{n_filas_crudas}**\n"
+            f"- OC (Pedidos) únicas en esas filas: **{n_oc_unicas}**\n"
+            f"- OC 100% Directas (todas sus líneas son Directos, no van en camión): "
+            f"**{len(oc_100_directas)}**\n"
+            f"- OC con líneas mixtas (parte Directo + parte en camión, sí cuentan en "
+            f"el Plan): **{len(oc_mixtas)}**\n"
+            f"- OC finales que van en camión (= filas del Plan de Despacho): "
+            f"**{len(detalle)}**"
+        )
+        st.caption("Si 'OC únicas' menos 'OC 100% Directas' no calza con las OC "
+                   "finales, puede haber Pedidos duplicados con datos distintos en "
+                   "la hoja de origen — revisa esos casos en el Refresh.")
+
     with st.expander("📈 KPIs y análisis adicionales", expanded=True):
         dias_orden = [d for d in cfg["dias_opciones"] if d in dias]
         render_kpis_avanzados(resumen, detalle, tabla_directos, cfg,
