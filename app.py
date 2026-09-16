@@ -3009,11 +3009,6 @@ def render_plan_hoja(archivo, cfg: dict):
         st.error("⚠️ No alcanzan las ventanas de la semana para todos los camiones "
                   "necesarios. Suma días/ventanas o revisa las capacidades.")
 
-    with st.expander("📈 KPIs y análisis adicionales", expanded=True):
-        dias_orden = [d for d in cfg["dias_opciones"] if d in dias]
-        render_kpis_avanzados(resumen, detalle, tabla_directos, cfg,
-                               vueltas_por_camion, dias_orden, key_ns)
-
     excel_pendientes = exportar_pendientes_excel(detalle)
     excel_checklist = exportar_checklist_carga(detalle, semana, cfg)
     col_desc_a, col_desc_b, col_desc_c = st.columns(3)
@@ -3058,6 +3053,11 @@ def render_plan_hoja(archivo, cfg: dict):
             )
         else:
             st.success("✅ Todas las OC de esta semana ya aparecen como Facturadas.")
+
+    with st.expander("📈 KPIs y análisis adicionales", expanded=True):
+        dias_orden = [d for d in cfg["dias_opciones"] if d in dias]
+        render_kpis_avanzados(resumen, detalle, tabla_directos, cfg,
+                               vueltas_por_camion, dias_orden, key_ns)
 
     # Capacidad máxima real disponible = el camión/rampla más grande que se
     # pueda usar (incluye la rampla de rescate). Una OC individual con más
