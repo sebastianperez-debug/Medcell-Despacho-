@@ -467,6 +467,13 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str, cfg: dict) -> pd.Da
 # 3. ARMADO DE CAMIONES (bin packing, OC nunca se parte)
 # --------------------------------------------------------------------------
 
+# Tamano maximo (en pallets) de una OC para que pueda "rellenar" el hueco de un
+# camion anterior ya casi lleno (ver empacar()). None = sin limite: cualquier OC
+# puede adelantarse a un hueco. Si prefieres que solo se adelanten fragmentos
+# chicos (ej: que una OC de 2 pal si pueda subirse al camion del lunes, pero una
+# de 5 pal no), pon aca ese umbral: BACKFILL_MAX_PALLETS = 2.
+BACKFILL_MAX_PALLETS = None
+
 def _intercalar_con_minimo_diario(bins_por_division: dict, dias: list[str],
                                    ventanas_por_dia: int, minimo_por_division: dict,
                                    orden_prioridad: list[int]) -> list[dict]:
@@ -562,24 +569,59 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
         return b
 
     def empacar(items, capacidades_local, rescate_local):
+        """Empaque FIRST-FIT: mantiene todos los camiones abiertos y mete cada
+        OC en el PRIMER camion donde quepa (no solo en el ultimo abierto).
+
+        Antes esto era next-fit (un solo camion abierto): apenas una OC no
+        cabia, el camion se cerraba y su espacio libre se perdia para siempre.
+        Eso dejaba casos como un camion de 13 cerrado con 11 pal mientras OC
+        chicas de 2 pal de la misma division armaban camiones aparte mas
+        adelante en la semana. Con first-fit esas OC chicas rellenan el hueco
+        y se adelantan al dia de ese camion.
+
+        El orden de creacion de los camiones sigue siendo por prioridad, asi
+        que las ventanas mas tempranas las toman igual las OC mas urgentes; lo
+        unico que cambia es que una OC posterior puede subirse a un hueco
+        anterior. El numero de camiones solo puede bajar, nunca subir."""
         cap_max_local = max(capacidades_local)
         items = sorted(items, key=lambda x: (orden_prioridad.index(x["prioridad"]), -x["pallets_empaque"]))
-        bins_local, actual = [], {"items": [], "total": 0.0}
+        abiertos = []
         for it in items:
             if it["pallets_empaque"] > cap_max_local:
-                if actual["items"]:
-                    bins_local.append(cerrar(actual, capacidades_local, rescate_local))
-                    actual = {"items": [], "total": 0.0}
-                bins_local.append(cerrar({"items": [it], "total": it["pallets_empaque"]}, capacidades_local, rescate_local))
+                # OC que por si sola supera la capacidad normal: va sola y se
+                # marca para que el first-fit no le meta nada (el relleno de
+                # ramplas de rescate lo hace despues
+                # _rellenar_ramplas_con_sobrantes, con camiones completos).
+                abiertos.append({"items": [it], "total": it["pallets_empaque"], "_solo": True})
                 continue
-            if actual["total"] + it["pallets_empaque"] <= cap_max_local:
-                actual["items"].append(it)
-                actual["total"] += it["pallets_empaque"]
+            puede_rellenar = (
+                BACKFILL_MAX_PALLETS is None
+                or it["pallets_empaque"] <= BACKFILL_MAX_PALLETS
+            )
+            destino = None
+            if puede_rellenar:
+                # Primer camion abierto (el mas prioritario/temprano) con espacio.
+                destino = next(
+                    (b for b in abiertos
+                     if not b.get("_solo")
+                     and b["total"] + it["pallets_empaque"] <= cap_max_local),
+                    None,
+                )
+            elif abiertos and not abiertos[-1].get("_solo") \
+                    and abiertos[-1]["total"] + it["pallets_empaque"] <= cap_max_local:
+                # OC grande con backfill limitado: se comporta como antes
+                # (solo intenta el ultimo camion abierto).
+                destino = abiertos[-1]
+            if destino is None:
+                abiertos.append({"items": [it], "total": it["pallets_empaque"]})
             else:
-                bins_local.append(cerrar(actual, capacidades_local, rescate_local))
-                actual = {"items": [it], "total": it["pallets_empaque"]}
-        if actual["items"]:
-            bins_local.append(cerrar(actual, capacidades_local, rescate_local))
+                destino["items"].append(it)
+                destino["total"] += it["pallets_empaque"]
+
+        bins_local = []
+        for b in abiertos:
+            b.pop("_solo", None)
+            bins_local.append(cerrar(b, capacidades_local, rescate_local))
         return bins_local
 
     agg = agg.copy()
