@@ -268,6 +268,9 @@ HOJAS_CONFIG = {
         # "dias_preferidos_produccion" y asignar_ventanas().
         "produccion": "Producción",
         "dias_preferidos_produccion": {"Miercoles", "Miércoles", "Jueves"},
+        # Columna "Campaña" (BQ del Refresh): se muestra tal cual en el
+        # checklist de carga (columna "Campaña"), solo informativa.
+        "campana": "Campaña",
     },
     "PU": {
         "hoja": "PU", "semana": "Sem", "oc": "OC", "pedido": "Pedido",
@@ -455,9 +458,17 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str, cfg: dict) -> pd.Da
         )
         agg_kwargs["requiere_produccion"] = ("_produccion_flag", "any")
 
+    # Columna "Campaña" (BQ del Refresh): informativa, se lleva tal cual
+    # (primer valor no vacio de la OC) hasta el checklist de carga.
+    col_campana = cfg.get("campana")
+    if col_campana and col_campana in df_camion.columns:
+        agg_kwargs["campana"] = (col_campana, "first")
+
     agg = df_camion.groupby(cfg["pedido"]).agg(**agg_kwargs).reset_index()
     if "pv" not in agg.columns:
         agg["pv"] = 0
+    if "campana" not in agg.columns:
+        agg["campana"] = ""
     if "requiere_produccion" not in agg.columns:
         agg["requiere_produccion"] = False
 
@@ -958,10 +969,13 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
                 "Pedido (OC)": it["Pedido"], "OC": it["oc"], "Fecha vence": it["fecha_vence"],
                 "División": it["division"],
                 "Prioridad": it["prioridad"], "Descripción prioridad": it["prioridad_label"],
+                "Solicitado": it.get("sol", 0), "1 Posible": it.get("pos1", 0),
+                "Pronto-vence": it.get("pv", 0),
                 "Pallets": it["pallets"], "Monto": it.get("monto", 0), "# SKUs": it["n_sku"],
                 "Camión #": it["camion_num"], "Día": it["dia"], "Fecha": it.get("fecha"),
                 "Ventana": it["ventana"], "Facturado": estado_fact,
                 "Requiere Producción": "Sí" if it.get("requiere_produccion") else "No",
+                "Campaña": it.get("campana") or "",
             })
     detalle = pd.DataFrame(detalle_rows)
 
@@ -1462,6 +1476,144 @@ def exportar_excel(resumen: pd.DataFrame, detalle: pd.DataFrame,
             for r in range(2, len(resumen) + 2):
                 ws.cell(row=r, column=col_pallets).number_format = "0"
                 ws.cell(row=r, column=col_util).number_format = "0.0"
+    return buf.getvalue()
+
+
+def _pestana_checklist_de(division: str) -> str:
+    """A que pestaña del checklist de carga va cada division real del
+    Refresh: todo lo que contenga 'FARMA' -> 'Salcobrand' (el cliente farma
+    actual); cualquier otra division (Consumo Masivo, etc.) -> 'Consumo'."""
+    return "Salcobrand" if "FARMA" in str(division).upper() else "Consumo"
+
+
+def exportar_checklist_carga(detalle: pd.DataFrame, semana, cfg: dict) -> bytes | None:
+    """Genera el Excel de checklist de carga, con el mismo formato que usa
+    Operaciones a mano en Google Sheets (título de cliente/división arriba,
+    columna de verificación en blanco, numeración de carga): UNA pestaña
+    por división ('Salcobrand' para Farma, 'Consumo' para el resto), con
+    TODAS las OC de la semana (esten o no facturadas). Cada pestaña trae:
+    - 'Carga OC': numeración correlativa 1..N DENTRO de esa pestaña, en el
+      mismo orden cronológico (Fecha -> Ventana -> Prioridad) que ya trae
+      'detalle' desde generar_plan (no se reordena de nuevo aca).
+    - 'Día': el día de despacho de esa OC (columna nueva, aparte del
+      número de carga).
+    - 'Verificador': casillero en blanco para marcar a mano al cargar
+      físicamente el camión (Excel/openpyxl no soporta checkboxes nativos,
+      así que se deja un recuadro vacío con borde marcado).
+    - 'Facturada': 'Sí' / 'Parcial' / vacío si aún no se ha facturado.
+    Devuelve None si no hay OC para mostrar."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    if detalle is None or detalle.empty:
+        return None
+
+    d = detalle.copy()
+    d["_pestana"] = d["División"].apply(_pestana_checklist_de)
+
+    header_fill = PatternFill("solid", fgColor="0B4F86")
+    header_font = Font(bold=True, color="FFFFFF")
+    titulo_fill = PatternFill("solid", fgColor="FDE9D9")
+    division_fill = PatternFill("solid", fgColor="FFF200")
+    fact_fill = {
+        "Sí": PatternFill("solid", fgColor="C6EFCE"),
+        "Parcial": PatternFill("solid", fgColor="FDE3B8"),
+    }
+    thin = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    border_check = Border(
+        left=Side(style="medium"), right=Side(style="medium"),
+        top=Side(style="medium"), bottom=Side(style="medium"),
+    )
+    centrado = Alignment(horizontal="center", vertical="center")
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        hay_alguna_hoja = False
+        for pestana in ["Salcobrand", "Consumo"]:
+            sub = d[d["_pestana"] == pestana].copy()
+            if sub.empty:
+                continue
+            hay_alguna_hoja = True
+            sub = sub.reset_index(drop=True)
+            sub.insert(0, "Carga OC", range(1, len(sub) + 1))
+            sub["Facturada"] = sub["Facturado"].map({"Sí": "Sí", "Parcial": "Parcial"}).fillna("")
+            sub["Verificador"] = ""
+
+            cols_orden = [
+                "Carga OC", "Verificador", "Pedido (OC)", "OC", "Día",
+                "Solicitado", "1 Posible", "Pronto-vence", "Pallets",
+                "# SKUs", "Campaña", "Facturada",
+            ]
+            cols_orden = [c for c in cols_orden if c in sub.columns]
+            vista = sub[cols_orden].rename(columns={
+                "Pedido (OC)": "Pedido",
+                "1 Posible": "Posible actual",
+                "Pallets": "Pallet estimado",
+                "# SKUs": "líneas",
+            })
+
+            nombre_hoja = pestana[:31]
+            vista.to_excel(writer, sheet_name=nombre_hoja, index=False, startrow=2)
+            ws = writer.sheets[nombre_hoja]
+
+            n_filas, n_cols = vista.shape
+            ultima_letra = get_column_letter(n_cols) if n_cols else "A"
+
+            # Fila 1: nombre de cliente/pestaña. Fila 2: división + semana.
+            ws.merge_cells(f"A1:{ultima_letra}1")
+            c1 = ws.cell(row=1, column=1, value=pestana)
+            c1.font = Font(bold=True, size=16, color="1F2937")
+            c1.alignment = centrado
+            c1.fill = titulo_fill
+            ws.row_dimensions[1].height = 26
+
+            division_txt = "FARMA" if pestana == "Salcobrand" else "CONSUMO MASIVO"
+            ws.merge_cells(f"A2:{ultima_letra}2")
+            c2 = ws.cell(row=2, column=1, value=f"{division_txt} · Semana {semana}")
+            c2.font = Font(bold=True, size=12, color="1F2937")
+            c2.alignment = centrado
+            c2.fill = division_fill
+            ws.row_dimensions[2].height = 20
+
+            fila_header = 3  # startrow=2 (0-based) -> fila 3 real en Excel
+            for c in range(1, n_cols + 1):
+                cell = ws.cell(row=fila_header, column=c)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = centrado
+                cell.border = border
+
+            col_facturada = vista.columns.get_loc("Facturada") + 1 if "Facturada" in vista.columns else None
+            col_verif = vista.columns.get_loc("Verificador") + 1 if "Verificador" in vista.columns else None
+            for r in range(fila_header + 1, fila_header + n_filas + 1):
+                relleno_fila = None
+                if col_facturada:
+                    val = ws.cell(row=r, column=col_facturada).value
+                    relleno_fila = fact_fill.get(val)
+                for c in range(1, n_cols + 1):
+                    cell = ws.cell(row=r, column=c)
+                    cell.alignment = centrado
+                    if col_verif and c == col_verif:
+                        cell.border = border_check
+                    else:
+                        cell.border = border
+                    if relleno_fila:
+                        cell.fill = relleno_fila
+
+            for idx_col, nombre_col in enumerate(vista.columns, start=1):
+                letra = get_column_letter(idx_col)
+                largo = max(
+                    [len(str(nombre_col))] + [len(str(v)) for v in vista[nombre_col].astype(str)]
+                ) if n_filas else len(str(nombre_col))
+                ws.column_dimensions[letra].width = min(max(largo + 3, 10), 40)
+            ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 0, 10)
+
+            ws.freeze_panes = f"A{fila_header + 1}"
+
+        if not hay_alguna_hoja:
+            return None
+
     return buf.getvalue()
 
 
@@ -2878,13 +3030,21 @@ def render_plan_hoja(archivo, cfg: dict):
                    "proveedor directo asignado.")
         st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
 
-    st.download_button(
-        "⬇️ Descargar plan en Excel",
-        data=exportar_excel(resumen, detalle, tabla_directos),
-        file_name=f"Plan_Despacho_{cfg['hoja']}_S{semana}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"btn_plan_{key_ns}",
-    )
+    excel_checklist = exportar_checklist_carga(detalle, semana, cfg)
+    if excel_checklist:
+        st.download_button(
+            "⬇️ Descargar checklist de carga (Excel)",
+            data=excel_checklist,
+            file_name=f"Checklist_Carga_{cfg['hoja']}_S{semana}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"btn_plan_{key_ns}",
+            help="Todas las OC de la semana (facturadas o no), separadas en pestañas "
+                 "'Salcobrand' (Farma) y 'Consumo', con numeración de carga, día de "
+                 "despacho y casillero de verificación, igual formato al que se usa "
+                 "a mano en Operaciones.",
+        )
+    else:
+        st.info("No hay OC para armar el checklist de carga de esta semana.")
 
 
 def render():
