@@ -3015,8 +3015,26 @@ def render_plan_hoja(archivo, cfg: dict):
                                vueltas_por_camion, dias_orden, key_ns)
 
     excel_pendientes = exportar_pendientes_excel(detalle)
-    col_desc_a, col_desc_b = st.columns(2)
+    excel_checklist = exportar_checklist_carga(detalle, semana, cfg)
+    col_desc_a, col_desc_b, col_desc_c = st.columns(3)
     with col_desc_a:
+        if excel_checklist:
+            st.download_button(
+                "⬇️ Descargar Plan de Despacho (Excel)",
+                data=excel_checklist,
+                file_name=f"Plan_de_Despacho_{cfg['hoja']}_S{semana}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"btn_plan_{key_ns}",
+                help="Todas las OC de la semana (facturadas o no), separadas en pestañas "
+                     "'Farma' y 'Consumo', con numeración de carga, día de "
+                     "despacho, N° de camión con línea de separación entre camiones y "
+                     "casillero de verificación, igual formato al que se usa a mano en "
+                     "Operaciones.",
+            )
+        else:
+            st.info("No hay OC para armar el Plan de Despacho de esta semana.")
+    with col_desc_b:
         refresh_bytes = _bytes_archivo_original(archivo)
         if refresh_bytes:
             st.download_button(
@@ -3027,7 +3045,7 @@ def render_plan_hoja(archivo, cfg: dict):
                 use_container_width=True,
                 key=f"btn_refresh_{key_ns}",
             )
-    with col_desc_b:
+    with col_desc_c:
         if excel_pendientes:
             n_pend = int((detalle["Facturado"] != "Sí").sum())
             st.download_button(
@@ -3109,23 +3127,6 @@ def render_plan_hoja(archivo, cfg: dict):
         st.caption(f"{info['lineas_directos']} líneas / {info['oc_directos']} OC con "
                    "proveedor directo asignado.")
         st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
-
-    excel_checklist = exportar_checklist_carga(detalle, semana, cfg)
-    if excel_checklist:
-        st.download_button(
-            "⬇️ Descargar checklist de carga (Excel)",
-            data=excel_checklist,
-            file_name=f"Plan_de_Despacho_{cfg['hoja']}_S{semana}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"btn_plan_{key_ns}",
-            help="Todas las OC de la semana (facturadas o no), separadas en pestañas "
-                 "'Farma' y 'Consumo', con numeración de carga, día de "
-                 "despacho, N° de camión con línea de separación entre camiones y "
-                 "casillero de verificación, igual formato al que se usa a mano en "
-                 "Operaciones.",
-        )
-    else:
-        st.info("No hay OC para armar el checklist de carga de esta semana.")
 
 
 def render():
