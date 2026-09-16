@@ -2841,21 +2841,31 @@ def render_plan_hoja(archivo, cfg: dict):
             # una vuelta suelta (ej: se presta un camion a otra area, se va a
             # mantencion, etc). Se descuentan ventanas SOLO ese dia; el resto
             # de la semana sigue con el cupo normal (n_camiones x vueltas).
+            # Por defecto (se repite igual todas las semanas, editable aca):
+            # Miercoles pierde 1 camion de 13 pallets completo, y Martes
+            # pierde 1 vuelta suelta.
+            _bajas_default = {"Miercoles": {"camiones": 1, "vueltas": 0},
+                               "Martes": {"camiones": 0, "vueltas": 1}}
             with st.expander("🚧 Camiones/vueltas no disponibles algún día"):
                 dias_con_baja = st.multiselect(
                     "Días con menor disponibilidad esta semana",
-                    dias, key=f"dias_baja_{key_ns}",
+                    dias, default=[d for d in dias if d in _bajas_default],
+                    key=f"dias_baja_{key_ns}",
                 )
                 bajas_por_dia = {}
                 for d in dias_con_baja:
                     c1, c2 = st.columns(2)
                     camiones_perdidos = c1.number_input(
                         f"Camiones perdidos completos — {d}", min_value=0,
-                        max_value=int(n_camiones), value=0, key=f"cam_perdidos_{key_ns}_{d}",
+                        max_value=int(n_camiones),
+                        value=_bajas_default.get(d, {}).get("camiones", 0),
+                        key=f"cam_perdidos_{key_ns}_{d}",
                     )
                     vueltas_perdidas = c2.number_input(
                         f"Vueltas sueltas perdidas — {d}", min_value=0,
-                        max_value=int(vueltas_por_camion), value=0, key=f"vta_perdidas_{key_ns}_{d}",
+                        max_value=int(vueltas_por_camion),
+                        value=_bajas_default.get(d, {}).get("vueltas", 0),
+                        key=f"vta_perdidas_{key_ns}_{d}",
                     )
                     bajas_por_dia[d] = int(camiones_perdidos) * int(vueltas_por_camion) + int(vueltas_perdidas)
 
