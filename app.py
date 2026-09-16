@@ -259,6 +259,15 @@ HOJAS_CONFIG = {
         # alguien elija sin querer una columna distinta y el numero de
         # pallets mostrado deje de calzar con el Excel de origen.
         "forzar_pallet_col": True,
+        # Columna "Producción" (BJ del Refresh): cuando trae algo (ej. el
+        # texto "Producción"), esa OC son productos que hay que ESPERAR que
+        # produccion fabrique, sin importar que la clasificacion de
+        # prioridad diga "1 - Solicitado = 1er Posible (completo)". Por eso
+        # esas OC se fuerzan a despacharse Miercoles o Jueves (mismos dias
+        # que se usan para la rampla de rescate), nunca antes -> ver
+        # "dias_preferidos_produccion" y asignar_ventanas().
+        "produccion": "Producción",
+        "dias_preferidos_produccion": {"Miercoles", "Miércoles", "Jueves"},
     },
     "PU": {
         "hoja": "PU", "semana": "Sem", "oc": "OC", "pedido": "Pedido",
@@ -434,9 +443,23 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str, cfg: dict) -> pd.Da
     if cfg["usa_pronto_vence"] and cfg["pronto_vence"] in df_camion.columns:
         agg_kwargs["pv"] = (cfg["pronto_vence"], "sum")
 
+    # Columna "Producción" (BJ del Refresh): si CUALQUIER linea de la OC
+    # trae algo ahi, es un producto que hay que esperar que produccion
+    # fabrique -> esa OC entera se marca para forzarse a Miercoles/Jueves
+    # en asignar_ventanas, sin importar que prioridad de despacho le toque.
+    col_produccion = cfg.get("produccion")
+    if col_produccion and col_produccion in df_camion.columns:
+        df_camion = df_camion.copy()
+        df_camion["_produccion_flag"] = df_camion[col_produccion].apply(
+            lambda x: str(x).strip() not in ("", "-", "nan", "None")
+        )
+        agg_kwargs["requiere_produccion"] = ("_produccion_flag", "any")
+
     agg = df_camion.groupby(cfg["pedido"]).agg(**agg_kwargs).reset_index()
     if "pv" not in agg.columns:
         agg["pv"] = 0
+    if "requiere_produccion" not in agg.columns:
+        agg["requiere_produccion"] = False
 
     pr = agg.apply(lambda r: _clasificar(r, cfg["usa_pronto_vence"]), axis=1, result_type="expand")
     agg["prioridad"], agg["prioridad_label"] = pr[0], pr[1]
@@ -474,17 +497,8 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str, cfg: dict) -> pd.Da
 # de 5 pal no), pon aca ese umbral: BACKFILL_MAX_PALLETS = 2.
 BACKFILL_MAX_PALLETS = None
 
-def _ventanas_del_dia(ventanas_por_dia, dia: str) -> int:
-    """ventanas_por_dia puede ser un int fijo (mismo cupo todos los dias) o un
-    dict {dia: cupo} cuando algun dia tiene menos disponibilidad (ej: se
-    pierde un camion completo o una vuelta ese dia especifico)."""
-    if isinstance(ventanas_por_dia, dict):
-        return ventanas_por_dia.get(dia, 0)
-    return ventanas_por_dia
-
-
 def _intercalar_con_minimo_diario(bins_por_division: dict, dias: list[str],
-                                   ventanas_por_dia, minimo_por_division: dict,
+                                   ventanas_por_dia: int, minimo_por_division: dict,
                                    orden_prioridad: list[int]) -> list[dict]:
     """Ordena los camiones dia por dia: primero reserva el minimo garantizado
     de cada division indicada en minimo_por_division (si hay camiones de esa
@@ -498,8 +512,8 @@ def _intercalar_con_minimo_diario(bins_por_division: dict, dias: list[str],
         return min(orden_prioridad.index(it["prioridad"]) for it in b["items"])
 
     orden_final = []
-    for dia in dias:
-        cupo_dia = _ventanas_del_dia(ventanas_por_dia, dia)
+    for _ in dias:
+        cupo_dia = ventanas_por_dia
         for div, minimo in minimo_por_division.items():
             n = 0
             while n < minimo and cupo_dia > 0 and colas.get(div):
@@ -523,7 +537,7 @@ def _intercalar_con_minimo_diario(bins_por_division: dict, dias: list[str],
 
 def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
                     orden_prioridad: list[int], dias: list[str] | None = None,
-                    ventanas_por_dia=None,
+                    ventanas_por_dia: int | None = None,
                     minimo_por_division: dict | None = None,
                     capacidad_rescate: int | None = None,
                     capacidades_por_division: dict | None = None,
@@ -630,6 +644,13 @@ def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
         bins_local = []
         for b in abiertos:
             b.pop("_solo", None)
+            # Si CUALQUIER OC del camion requiere esperar produccion, todo
+            # el camion queda marcado para forzarse a Miercoles/Jueves en
+            # asignar_ventanas (una OC nunca se parte, asi que el resto de
+            # OC que comparten ese camion tambien esperan ese dia).
+            b["requiere_produccion"] = any(
+                it.get("requiere_produccion") for it in b["items"]
+            )
             bins_local.append(cerrar(b, capacidades_local, rescate_local))
         return bins_local
 
@@ -709,6 +730,10 @@ def _rellenar_ramplas_con_sobrantes(bins_por_division: dict, capacidad_rescate: 
                 if candidato["total"] <= libre + 1e-6:
                     rampla["items"] = rampla["items"] + candidato["items"]
                     rampla["total"] = rampla["total"] + candidato["total"]
+                    rampla["requiere_produccion"] = (
+                        rampla.get("requiere_produccion", False)
+                        or candidato.get("requiere_produccion", False)
+                    )
                     libre -= candidato["total"]
                     normales.pop(i)
                     # no avanzamos i: puede que el siguiente (mas chico)
@@ -760,6 +785,10 @@ def _consolidar_con_rampla(bins: list[dict], ventanas_disponibles: int,
                     b1["items"] = b1["items"] + b2["items"]
                     b1["total"] = b1["total"] + b2["total"]
                     b1["camion"] = capacidad_rescate
+                    b1["requiere_produccion"] = (
+                        b1.get("requiere_produccion", False)
+                        or b2.get("requiere_produccion", False)
+                    )
                     del bins[i]
                     cambiado = True
                     break
@@ -769,10 +798,11 @@ def _consolidar_con_rampla(bins: list[dict], ventanas_disponibles: int,
 
 
 def asignar_ventanas(bins: list[dict], semana: int, anio: int,
-                      dias: list[str], ventanas_por_dia,
+                      dias: list[str], ventanas_por_dia: int,
                       usa_transportes: bool = False, n_transportes: int = 3,
                       capacidad_rescate: int | None = None,
-                      dias_preferidos_rampla: set | None = None):
+                      dias_preferidos_rampla: set | None = None,
+                      dias_preferidos_produccion: set | None = None):
     """Genera los "slots" (dia + ventana) donde se ubica cada camion.
 
     Modo normal (SB): dias x ventanas_por_dia es un tope fijo; si sobran
@@ -788,8 +818,18 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
     (por defecto Miercoles/Jueves, que es cuando en la practica se consigue
     ese transporte externo). Si esos dias no tienen cupo o no estan dentro
     de los dias habilitados esa semana, la rampla igual se despacha, solo
-    que cae en el resto de los dias como antes. El resto de los camiones
-    (no-rampla) rellenan los cupos que van quedando, en orden de dia."""
+    que cae en el resto de los dias como antes.
+
+    De la misma forma, cualquier camion que traiga al menos una OC marcada
+    "requiere_produccion" (columna "Producción" del Refresh: productos que
+    hay que esperar que produccion fabrique) se fuerza IGUAL a ubicarse
+    primero en dias_preferidos_produccion (por defecto tambien
+    Miercoles/Jueves), sin importar que prioridad de despacho le haya
+    tocado -aunque sea "1 - Solicitado = 1er Posible (completo)"-. Ambos
+    tipos de camion forzado (rampla y produccion) compiten por el mismo cupo
+    de dias preferidos, en el orden en que aparecen en `bins` (que ya viene
+    ordenado por prioridad). El resto de los camiones (no forzados) rellenan
+    los cupos que van quedando, en orden cronologico de dia/ventana."""
     lunes = datetime.date.fromisocalendar(anio, semana, 1)
     dia_offset = {"Lunes": 0, "Martes": 1, "Miercoles": 2, "Miércoles": 2,
                   "Jueves": 3, "Viernes": 4, "Sabado": 5, "Sábado": 5, "Domingo": 6}
@@ -809,27 +849,34 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
         slots = []
         for d in dias:
             fecha = lunes + datetime.timedelta(days=dia_offset.get(d, 0))
-            for v in range(1, _ventanas_del_dia(ventanas_por_dia, d) + 1):
+            for v in range(1, ventanas_por_dia + 1):
                 slots.append({"dia": d, "fecha": fecha, "ventana": v})
         overflow = len(bins) > len(slots)
 
-        if capacidad_rescate:
-            dias_pref = dias_preferidos_rampla or {"Miercoles", "Miércoles", "Jueves"}
+        hay_produccion = any(b.get("requiere_produccion") for b in bins)
+        if capacidad_rescate or hay_produccion:
+            dias_pref = (
+                set(dias_preferidos_rampla or set())
+                | set(dias_preferidos_produccion or set())
+            ) or {"Miercoles", "Miércoles", "Jueves"}
             idx_pref = [i for i, s in enumerate(slots) if s["dia"] in dias_pref]
             idx_resto = [i for i, s in enumerate(slots) if s["dia"] not in dias_pref]
 
             asignacion = {}
-            # 1) las ramplas (en el orden de prioridad que ya traian) se
-            # ubican primero en los dias preferidos; si se acaban, siguen
-            # con el resto de los dias en orden.
+            # 1) las ramplas y/o los camiones con OC que requieren esperar
+            # produccion (en el orden de prioridad que ya traian) se ubican
+            # primero en los dias preferidos; si se acaban, siguen con el
+            # resto de los dias en orden.
             for i, b in enumerate(bins):
-                if b.get("camion") == capacidad_rescate:
+                es_rampla = capacidad_rescate and b.get("camion") == capacidad_rescate
+                es_produccion = b.get("requiere_produccion")
+                if es_rampla or es_produccion:
                     if idx_pref:
                         asignacion[i] = idx_pref.pop(0)
                     elif idx_resto:
                         asignacion[i] = idx_resto.pop(0)
-            # 2) el resto de los camiones (no-rampla) rellenan los cupos que
-            # vayan quedando, respetando el orden cronologico de dia/ventana.
+            # 2) el resto de los camiones (sin rampla ni produccion) rellenan
+            # los cupos que vayan quedando, en orden cronologico de dia/ventana.
             libres = sorted(idx_pref + idx_resto)
             for i, b in enumerate(bins):
                 if i not in asignacion:
@@ -856,7 +903,7 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
 # --------------------------------------------------------------------------
 
 def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
-                  capacidades: list[int], dias: list[str], ventanas_por_dia,
+                  capacidades: list[int], dias: list[str], ventanas_por_dia: int,
                   orden_prioridad: list[int], facturados: dict | None = None,
                   cfg: dict | None = None):
     cfg = cfg or HOJAS_CONFIG["SB"]
@@ -877,10 +924,7 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
     )
 
     if capacidad_rescate and not cfg.get("usa_transportes", False):
-        ventanas_disponibles = (
-            sum(_ventanas_del_dia(ventanas_por_dia, d) for d in dias)
-            if isinstance(ventanas_por_dia, dict) else len(dias) * ventanas_por_dia
-        )
+        ventanas_disponibles = len(dias) * ventanas_por_dia
         bins = _consolidar_con_rampla(
             bins, ventanas_disponibles, capacidad_rescate,
             divisiones_elegibles=cfg.get("rescate_divisiones"),
@@ -892,6 +936,7 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
         n_transportes=cfg.get("n_transportes", 3),
         capacidad_rescate=capacidad_rescate,
         dias_preferidos_rampla=cfg.get("dias_preferidos_rampla"),
+        dias_preferidos_produccion=cfg.get("dias_preferidos_produccion"),
     )
 
     resumen = pd.DataFrame([{
@@ -916,6 +961,7 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
                 "Pallets": it["pallets"], "Monto": it.get("monto", 0), "# SKUs": it["n_sku"],
                 "Camión #": it["camion_num"], "Día": it["dia"], "Fecha": it.get("fecha"),
                 "Ventana": it["ventana"], "Facturado": estado_fact,
+                "Requiere Producción": "Sí" if it.get("requiere_produccion") else "No",
             })
     detalle = pd.DataFrame(detalle_rows)
 
@@ -923,7 +969,9 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
             "oc_directos": tabla_directos["Pedido"].nunique() if not tabla_directos.empty else 0,
             "lineas_directos": len(tabla_directos),
             "oc_facturadas": int((detalle["Facturado"] == "Sí").sum()),
-            "oc_parciales": int((detalle["Facturado"] == "Parcial").sum())}
+            "oc_parciales": int((detalle["Facturado"] == "Parcial").sum()),
+            "oc_produccion": int(detalle.loc[detalle["Requiere Producción"] == "Sí", "Pedido (OC)"].nunique())
+            if "Requiere Producción" in detalle.columns else 0}
     return resumen, detalle, info, tabla_directos
 
 
@@ -1128,6 +1176,12 @@ def render_calendario(detalle: pd.DataFrame, resumen: pd.DataFrame | None = None
                             )
                         else:
                             chip = ""
+                        if row.get("Requiere Producción") == "Sí":
+                            chip += (
+                                "<span style='background:#7C3AED26;color:#C4B5FD;font-size:0.6rem;"
+                                "font-weight:700;padding:0.05rem 0.4rem;border-radius:999px;"
+                                "white-space:nowrap;margin-left:0.4rem;'>🏭 PRODUCCIÓN</span>"
+                            )
                         # El aviso de "excede capacidad" va en su propia franja debajo
                         # del titulo (no como chip en linea) para que no se corte / envuelva.
                         banner_excede = (
@@ -2572,37 +2626,6 @@ def render_plan_hoja(archivo, cfg: dict):
                 )
             ventanas_por_dia = int(n_camiones) * int(vueltas_por_camion)
             st.caption(f"= {ventanas_por_dia} ventanas/día ({n_camiones} camiones × {vueltas_por_camion} vueltas).")
-
-            # Ajustes puntuales: dias donde se pierde un camion completo y/o
-            # una vuelta suelta (ej: se presta un camion a otra area, se va a
-            # mantencion, etc). Se descuentan ventanas SOLO ese dia; el resto
-            # de la semana sigue con el cupo normal (n_camiones x vueltas).
-            with st.expander("🚧 Camiones/vueltas no disponibles algún día"):
-                dias_con_baja = st.multiselect(
-                    "Días con menor disponibilidad esta semana",
-                    dias, key=f"dias_baja_{key_ns}",
-                )
-                bajas_por_dia = {}
-                for d in dias_con_baja:
-                    c1, c2 = st.columns(2)
-                    camiones_perdidos = c1.number_input(
-                        f"Camiones perdidos completos — {d}", min_value=0,
-                        max_value=int(n_camiones), value=0, key=f"cam_perdidos_{key_ns}_{d}",
-                    )
-                    vueltas_perdidas = c2.number_input(
-                        f"Vueltas sueltas perdidas — {d}", min_value=0,
-                        max_value=int(vueltas_por_camion), value=0, key=f"vta_perdidas_{key_ns}_{d}",
-                    )
-                    bajas_por_dia[d] = int(camiones_perdidos) * int(vueltas_por_camion) + int(vueltas_perdidas)
-
-                if any(bajas_por_dia.values()):
-                    ventanas_por_dia = {
-                        d: max(0, ventanas_por_dia - bajas_por_dia.get(d, 0)) for d in dias
-                    }
-                    resumen_baja = "; ".join(
-                        f"{d}: {ventanas_por_dia[d]} ventanas" for d in dias_con_baja
-                    )
-                    st.caption(f"⚠️ Ajustado: {resumen_baja} (resto de días sin cambio).")
         else:
             ventanas_por_dia = st.number_input(
                 "Ventanas de despacho por día", value=cfg.get("ventanas_por_dia_default", 4),
@@ -2612,18 +2635,22 @@ def render_plan_hoja(archivo, cfg: dict):
             rescate_div_txt = (
                 ", ".join(sorted(cfg["rescate_divisiones"])) if cfg.get("rescate_divisiones") else "todas las divisiones"
             )
-            _total_ventanas_txt = (
-                str(sum(ventanas_por_dia.values())) + " ventanas (con ajustes por día)"
-                if isinstance(ventanas_por_dia, dict)
-                else f"{len(dias)} días × {ventanas_por_dia} ventanas"
-            )
             st.caption(
                 f"🚛 Camiones normales de {cfg['capacidades_default'][0]} pallets. Si el total "
                 f"de camiones no alcanza en las ventanas disponibles de la semana "
-                f"({_total_ventanas_txt}) -es decir, no alcanza la "
+                f"({len(dias)} días × {ventanas_por_dia} ventanas) -es decir, no alcanza la "
                 f"cubicación para despachar todo-, como ÚLTIMO RECURSO se fusionan los "
                 f"camiones menos prioritarios (misma división) en ramplas de "
                 f"{cfg['capacidad_rescate']} pallets. Aplica solo a: {rescate_div_txt}."
+            )
+        if cfg.get("produccion"):
+            dias_prod_txt = ", ".join(sorted(cfg.get("dias_preferidos_produccion") or [])) or "Miercoles, Jueves"
+            st.caption(
+                f"🏭 Si la columna '{cfg['produccion']}' del Refresh trae algo para una OC "
+                "(son productos que hay que esperar que produzca producción), esa OC se "
+                "fuerza a despacharse el Miércoles o Jueves, aunque su prioridad sea "
+                "'1 - Solicitado = 1er Posible (completo)'. Se marca con el chip 🏭 "
+                f"PRODUCCIÓN. Días preferidos: {dias_prod_txt}."
             )
         if cfg.get("capacidades_por_division"):
             flota_txt = "; ".join(
@@ -2670,8 +2697,7 @@ def render_plan_hoja(archivo, cfg: dict):
 
     resumen, detalle, info, tabla_directos = generar_plan(
         df, semana, int(anio), pallet_col, capacidades, dias,
-        ventanas_por_dia if isinstance(ventanas_por_dia, dict) else int(ventanas_por_dia),
-        orden_prioridad, facturados, cfg,
+        int(ventanas_por_dia), orden_prioridad, facturados, cfg,
     )
 
     if resumen is None:
@@ -2706,6 +2732,11 @@ def render_plan_hoja(archivo, cfg: dict):
             },
             {"value": info["oc_directos"], "label": "OC 100% Directos"},
             {"value": info["oc_facturadas"], "label": "OC ya Facturadas"},
+            {
+                "value": info.get("oc_produccion", 0), "label": "OC esperando Producción",
+                "badge_text": "Miér./Jue." if info.get("oc_produccion", 0) else None,
+                "badge_color": "#7C3AED",
+            },
         ])
     if info["overflow"]:
         st.error("⚠️ No alcanzan las ventanas de la semana para todos los camiones "
