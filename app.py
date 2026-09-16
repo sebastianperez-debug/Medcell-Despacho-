@@ -474,8 +474,17 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str, cfg: dict) -> pd.Da
 # de 5 pal no), pon aca ese umbral: BACKFILL_MAX_PALLETS = 2.
 BACKFILL_MAX_PALLETS = None
 
+def _ventanas_del_dia(ventanas_por_dia, dia: str) -> int:
+    """ventanas_por_dia puede ser un int fijo (mismo cupo todos los dias) o un
+    dict {dia: cupo} cuando algun dia tiene menos disponibilidad (ej: se
+    pierde un camion completo o una vuelta ese dia especifico)."""
+    if isinstance(ventanas_por_dia, dict):
+        return ventanas_por_dia.get(dia, 0)
+    return ventanas_por_dia
+
+
 def _intercalar_con_minimo_diario(bins_por_division: dict, dias: list[str],
-                                   ventanas_por_dia: int, minimo_por_division: dict,
+                                   ventanas_por_dia, minimo_por_division: dict,
                                    orden_prioridad: list[int]) -> list[dict]:
     """Ordena los camiones dia por dia: primero reserva el minimo garantizado
     de cada division indicada en minimo_por_division (si hay camiones de esa
@@ -489,8 +498,8 @@ def _intercalar_con_minimo_diario(bins_por_division: dict, dias: list[str],
         return min(orden_prioridad.index(it["prioridad"]) for it in b["items"])
 
     orden_final = []
-    for _ in dias:
-        cupo_dia = ventanas_por_dia
+    for dia in dias:
+        cupo_dia = _ventanas_del_dia(ventanas_por_dia, dia)
         for div, minimo in minimo_por_division.items():
             n = 0
             while n < minimo and cupo_dia > 0 and colas.get(div):
@@ -514,7 +523,7 @@ def _intercalar_con_minimo_diario(bins_por_division: dict, dias: list[str],
 
 def armar_camiones(agg: pd.DataFrame, capacidades: list[int],
                     orden_prioridad: list[int], dias: list[str] | None = None,
-                    ventanas_por_dia: int | None = None,
+                    ventanas_por_dia=None,
                     minimo_por_division: dict | None = None,
                     capacidad_rescate: int | None = None,
                     capacidades_por_division: dict | None = None,
@@ -760,7 +769,7 @@ def _consolidar_con_rampla(bins: list[dict], ventanas_disponibles: int,
 
 
 def asignar_ventanas(bins: list[dict], semana: int, anio: int,
-                      dias: list[str], ventanas_por_dia: int,
+                      dias: list[str], ventanas_por_dia,
                       usa_transportes: bool = False, n_transportes: int = 3,
                       capacidad_rescate: int | None = None,
                       dias_preferidos_rampla: set | None = None):
@@ -800,7 +809,7 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
         slots = []
         for d in dias:
             fecha = lunes + datetime.timedelta(days=dia_offset.get(d, 0))
-            for v in range(1, ventanas_por_dia + 1):
+            for v in range(1, _ventanas_del_dia(ventanas_por_dia, d) + 1):
                 slots.append({"dia": d, "fecha": fecha, "ventana": v})
         overflow = len(bins) > len(slots)
 
@@ -847,7 +856,7 @@ def asignar_ventanas(bins: list[dict], semana: int, anio: int,
 # --------------------------------------------------------------------------
 
 def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
-                  capacidades: list[int], dias: list[str], ventanas_por_dia: int,
+                  capacidades: list[int], dias: list[str], ventanas_por_dia,
                   orden_prioridad: list[int], facturados: dict | None = None,
                   cfg: dict | None = None):
     cfg = cfg or HOJAS_CONFIG["SB"]
@@ -868,7 +877,10 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
     )
 
     if capacidad_rescate and not cfg.get("usa_transportes", False):
-        ventanas_disponibles = len(dias) * ventanas_por_dia
+        ventanas_disponibles = (
+            sum(_ventanas_del_dia(ventanas_por_dia, d) for d in dias)
+            if isinstance(ventanas_por_dia, dict) else len(dias) * ventanas_por_dia
+        )
         bins = _consolidar_con_rampla(
             bins, ventanas_disponibles, capacidad_rescate,
             divisiones_elegibles=cfg.get("rescate_divisiones"),
@@ -2560,6 +2572,37 @@ def render_plan_hoja(archivo, cfg: dict):
                 )
             ventanas_por_dia = int(n_camiones) * int(vueltas_por_camion)
             st.caption(f"= {ventanas_por_dia} ventanas/día ({n_camiones} camiones × {vueltas_por_camion} vueltas).")
+
+            # Ajustes puntuales: dias donde se pierde un camion completo y/o
+            # una vuelta suelta (ej: se presta un camion a otra area, se va a
+            # mantencion, etc). Se descuentan ventanas SOLO ese dia; el resto
+            # de la semana sigue con el cupo normal (n_camiones x vueltas).
+            with st.expander("🚧 Camiones/vueltas no disponibles algún día"):
+                dias_con_baja = st.multiselect(
+                    "Días con menor disponibilidad esta semana",
+                    dias, key=f"dias_baja_{key_ns}",
+                )
+                bajas_por_dia = {}
+                for d in dias_con_baja:
+                    c1, c2 = st.columns(2)
+                    camiones_perdidos = c1.number_input(
+                        f"Camiones perdidos completos — {d}", min_value=0,
+                        max_value=int(n_camiones), value=0, key=f"cam_perdidos_{key_ns}_{d}",
+                    )
+                    vueltas_perdidas = c2.number_input(
+                        f"Vueltas sueltas perdidas — {d}", min_value=0,
+                        max_value=int(vueltas_por_camion), value=0, key=f"vta_perdidas_{key_ns}_{d}",
+                    )
+                    bajas_por_dia[d] = int(camiones_perdidos) * int(vueltas_por_camion) + int(vueltas_perdidas)
+
+                if any(bajas_por_dia.values()):
+                    ventanas_por_dia = {
+                        d: max(0, ventanas_por_dia - bajas_por_dia.get(d, 0)) for d in dias
+                    }
+                    resumen_baja = "; ".join(
+                        f"{d}: {ventanas_por_dia[d]} ventanas" for d in dias_con_baja
+                    )
+                    st.caption(f"⚠️ Ajustado: {resumen_baja} (resto de días sin cambio).")
         else:
             ventanas_por_dia = st.number_input(
                 "Ventanas de despacho por día", value=cfg.get("ventanas_por_dia_default", 4),
@@ -2569,10 +2612,15 @@ def render_plan_hoja(archivo, cfg: dict):
             rescate_div_txt = (
                 ", ".join(sorted(cfg["rescate_divisiones"])) if cfg.get("rescate_divisiones") else "todas las divisiones"
             )
+            _total_ventanas_txt = (
+                str(sum(ventanas_por_dia.values())) + " ventanas (con ajustes por día)"
+                if isinstance(ventanas_por_dia, dict)
+                else f"{len(dias)} días × {ventanas_por_dia} ventanas"
+            )
             st.caption(
                 f"🚛 Camiones normales de {cfg['capacidades_default'][0]} pallets. Si el total "
                 f"de camiones no alcanza en las ventanas disponibles de la semana "
-                f"({len(dias)} días × {ventanas_por_dia} ventanas) -es decir, no alcanza la "
+                f"({_total_ventanas_txt}) -es decir, no alcanza la "
                 f"cubicación para despachar todo-, como ÚLTIMO RECURSO se fusionan los "
                 f"camiones menos prioritarios (misma división) en ramplas de "
                 f"{cfg['capacidad_rescate']} pallets. Aplica solo a: {rescate_div_txt}."
@@ -2622,7 +2670,8 @@ def render_plan_hoja(archivo, cfg: dict):
 
     resumen, detalle, info, tabla_directos = generar_plan(
         df, semana, int(anio), pallet_col, capacidades, dias,
-        int(ventanas_por_dia), orden_prioridad, facturados, cfg,
+        ventanas_por_dia if isinstance(ventanas_por_dia, dict) else int(ventanas_por_dia),
+        orden_prioridad, facturados, cfg,
     )
 
     if resumen is None:
