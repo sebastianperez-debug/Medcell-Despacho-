@@ -965,6 +965,41 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
             })
     detalle = pd.DataFrame(detalle_rows)
 
+    # Reordena AMBAS tablas (resumen y detalle) de forma CRONOLOGICA
+    # (Fecha real -> Ventana), en vez de dejarlas en el orden en que se
+    # crearon los camiones (que sigue la prioridad de despacho: 1, 2, 5, 3).
+    # Sin esto, un camion de prioridad alta que igual sale mas tarde en la
+    # semana (ej: por la regla de Miercoles/Jueves para rampla o para OC que
+    # esperan produccion) podia aparecer ANTES en la tabla que camiones de
+    # dias anteriores, lo que confundia al leerla de arriba a abajo. De paso
+    # se renumera "Camión #" para que el numero tambien seas consecutivo en
+    # ese mismo orden cronologico (Camión #1 = el primero que sale en la
+    # semana), y se propaga el mapeo de numeros al detalle para que ambas
+    # tablas (y el Excel exportado) queden consistentes entre si.
+    def _clave_ventana(v):
+        try:
+            return (0, int(v))
+        except (TypeError, ValueError):
+            return (1, str(v))
+
+    _fecha_max = datetime.date.max
+    resumen = resumen.assign(
+        _orden_fecha=resumen["Fecha"].apply(lambda f: f if pd.notna(f) else _fecha_max),
+        _orden_ventana=resumen["Ventana"].apply(_clave_ventana),
+    ).sort_values(by=["_orden_fecha", "_orden_ventana"]).reset_index(drop=True)
+
+    mapa_camion = {int(old): i + 1 for i, old in enumerate(resumen["Camión #"])}
+    resumen["Camión #"] = resumen["Camión #"].map(mapa_camion)
+    resumen = resumen.drop(columns=["_orden_fecha", "_orden_ventana"])
+
+    if not detalle.empty:
+        detalle = detalle.assign(
+            _orden_fecha=detalle["Fecha"].apply(lambda f: f if pd.notna(f) else _fecha_max),
+            _orden_ventana=detalle["Ventana"].apply(_clave_ventana),
+        ).sort_values(by=["_orden_fecha", "_orden_ventana", "Prioridad"]).reset_index(drop=True)
+        detalle["Camión #"] = detalle["Camión #"].map(mapa_camion)
+        detalle = detalle.drop(columns=["_orden_fecha", "_orden_ventana"])
+
     info = {"camiones": len(bins), "ventanas_disponibles": len(slots), "overflow": overflow,
             "oc_directos": tabla_directos["Pedido"].nunique() if not tabla_directos.empty else 0,
             "lineas_directos": len(tabla_directos),
