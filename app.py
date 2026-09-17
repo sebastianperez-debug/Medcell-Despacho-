@@ -492,9 +492,12 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str, cfg: dict) -> pd.Da
     agg["monto"] = agg["monto"].round(0)
     agg = agg.rename(columns={cfg["pedido"]: "Pedido"})
     # OC con 0 pallets (linea unica que quedo en 0 tras excluir directos) no
-    # necesita camion; se deja fuera del bin-packing.
+    # necesita camion; se deja fuera del bin-packing, pero se conserva aparte
+    # (en vez de descartarla en silencio) para poder mostrarla como "sin
+    # stock disponible" en la UI.
+    sin_stock = agg[agg["pallets"] <= 0].reset_index(drop=True)
     agg = agg[agg["pallets"] > 0].reset_index(drop=True)
-    return agg
+    return agg, sin_stock
 
 
 # --------------------------------------------------------------------------
@@ -929,9 +932,22 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
     facturados = facturados or {}
     df_camion, df_directos = separar_directos(df, semana, cfg)
     tabla_directos = resumen_directos(df_directos, cfg)
-    agg = agrupar_por_oc(df_camion, pallet_col, cfg)
+    agg, sin_stock = agrupar_por_oc(df_camion, pallet_col, cfg)
+
+    # OC sin stock disponible (0 pallets en toda la OC tras sacar Directos):
+    # no van en camion, pero se listan aparte para que no "desaparezcan" del
+    # conteo total sin explicacion (antes se descartaban en silencio).
+    cols_sin_stock = ["Pedido", "oc", "division", "fecha_vence", "sol", "pos1", "monto", "n_sku"]
+    if not sin_stock.empty:
+        tabla_sin_stock = sin_stock[[c for c in cols_sin_stock if c in sin_stock.columns]].rename(columns={
+            "oc": "OC", "division": "División", "fecha_vence": "Fecha vence",
+            "sol": "Solicitado", "pos1": "1 Posible", "monto": "Monto", "n_sku": "# SKUs",
+        })
+    else:
+        tabla_sin_stock = sin_stock
+
     if agg.empty:
-        return None, None, None, tabla_directos
+        return None, None, None, tabla_directos, tabla_sin_stock
 
     capacidad_rescate = cfg.get("capacidad_rescate")
     bins = armar_camiones(
@@ -1031,8 +1047,9 @@ def generar_plan(df: pd.DataFrame, semana: int, anio: int, pallet_col: str,
             "oc_facturadas": int((detalle["Facturado"] == "Sí").sum()),
             "oc_parciales": int((detalle["Facturado"] == "Parcial").sum()),
             "oc_produccion": int(detalle.loc[detalle["Requiere Producción"] == "Sí", "Pedido (OC)"].nunique())
-            if "Requiere Producción" in detalle.columns else 0}
-    return resumen, detalle, info, tabla_directos
+            if "Requiere Producción" in detalle.columns else 0,
+            "oc_sin_stock": tabla_sin_stock["Pedido"].nunique() if not tabla_sin_stock.empty else 0}
+    return resumen, detalle, info, tabla_directos, tabla_sin_stock
 
 
 def _resaltar_facturado_factory(cap_max: float | None = None, cap_por_division: dict | None = None):
@@ -2631,7 +2648,8 @@ def calcular_costos_flota(resumen: pd.DataFrame, cfg: dict, vueltas_por_camion: 
 
 def render_kpis_avanzados(resumen: pd.DataFrame, detalle: pd.DataFrame,
                            tabla_directos: pd.DataFrame, cfg: dict,
-                           vueltas_por_camion: int, dias_orden: list[str], key_ns: str):
+                           vueltas_por_camion: int, dias_orden: list[str], key_ns: str,
+                           tabla_sin_stock: pd.DataFrame | None = None):
     """Bloque de KPIs/gráficos adicionales: costo de flota (camión vs
     rampla), monto y cantidad de OC por categoría, OC en riesgo por
     vencimiento, carga por día y complejidad de picking (SKUs/camión)."""
@@ -2678,8 +2696,19 @@ def render_kpis_avanzados(resumen: pd.DataFrame, detalle: pd.DataFrame,
         m_directo = tabla_directos["Monto"].sum() if ("Monto" in tabla_directos.columns and not tabla_directos.empty) else 0.0
         filas.append({"Categoría": "DIRECTOS (no van en camión)", "# OC": n_oc_directo,
                       "Monto facturado": None, "Monto pendiente": m_directo})
-        filas.insert(0, {"Categoría": "TOTAL (camión + directos)", "# OC": total_oc + n_oc_directo,
-                         "Monto facturado": total_fact, "Monto pendiente": total_pend + m_directo})
+        n_oc_sin_stock = 0
+        m_sin_stock = 0.0
+        if tabla_sin_stock is not None and not tabla_sin_stock.empty:
+            n_oc_sin_stock = tabla_sin_stock["Pedido"].nunique()
+            m_sin_stock = tabla_sin_stock["Monto"].sum() if "Monto" in tabla_sin_stock.columns else 0.0
+            filas.append({"Categoría": "SIN STOCK (0 pallets, no van en camión)",
+                          "# OC": n_oc_sin_stock, "Monto facturado": None, "Monto pendiente": m_sin_stock})
+        filas.insert(0, {
+            "Categoría": "TOTAL (camión + directos + sin stock)",
+            "# OC": total_oc + n_oc_directo + n_oc_sin_stock,
+            "Monto facturado": total_fact,
+            "Monto pendiente": total_pend + m_directo + m_sin_stock,
+        })
         df_cat = pd.DataFrame(filas)
         st.dataframe(
             df_cat.style.format({"Monto facturado": lambda v: formato_clp(v) if pd.notna(v) else "—",
@@ -2961,7 +2990,7 @@ def render_plan_hoja(archivo, cfg: dict):
         st.warning("Elige al menos una capacidad de camión y un día hábil.")
         return
 
-    resumen, detalle, info, tabla_directos = generar_plan(
+    resumen, detalle, info, tabla_directos, tabla_sin_stock = generar_plan(
         df, semana, int(anio), pallet_col, capacidades, dias,
         ventanas_por_dia if isinstance(ventanas_por_dia, dict) else int(ventanas_por_dia),
         orden_prioridad, facturados, cfg,
@@ -2969,10 +2998,13 @@ def render_plan_hoja(archivo, cfg: dict):
 
     if resumen is None:
         st.warning(f"No hay OC para camión en la semana {semana} "
-                    f"(revisa si todas quedaron como Directos).")
+                    f"(revisa si todas quedaron como Directos o sin stock disponible).")
         if not tabla_directos.empty:
             st.subheader("Directos (información, no van en camión)")
             st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
+        if not tabla_sin_stock.empty:
+            st.subheader("Sin stock disponible (0 pallets, no van en camión)")
+            st.dataframe(tabla_sin_stock, use_container_width=True, hide_index=True)
         return
 
     if cfg.get("usa_transportes"):
@@ -2986,6 +3018,11 @@ def render_plan_hoja(archivo, cfg: dict):
             },
             {"value": info["oc_directos"], "label": "OC 100% Directos"},
             {"value": info["oc_facturadas"], "label": "OC ya Facturadas"},
+            {
+                "value": info.get("oc_sin_stock", 0), "label": "OC sin stock disponible",
+                "badge_text": "0 pallets" if info.get("oc_sin_stock", 0) else None,
+                "badge_color": "#E4572E",
+            },
         ])
     else:
         holgura = info["ventanas_disponibles"] - info["camiones"]
@@ -3003,6 +3040,11 @@ def render_plan_hoja(archivo, cfg: dict):
                 "value": info.get("oc_produccion", 0), "label": "OC esperando Producción",
                 "badge_text": "Miér./Jue." if info.get("oc_produccion", 0) else None,
                 "badge_color": "#7C3AED",
+            },
+            {
+                "value": info.get("oc_sin_stock", 0), "label": "OC sin stock disponible",
+                "badge_text": "0 pallets" if info.get("oc_sin_stock", 0) else None,
+                "badge_color": "#E4572E",
             },
         ])
     if info["overflow"]:
@@ -3063,6 +3105,8 @@ def render_plan_hoja(archivo, cfg: dict):
         oc_directos_ctrl = set(_df_dir_ctrl[cfg["pedido"]].unique())
         oc_100_directas = oc_directos_ctrl - oc_camion_ctrl
         oc_mixtas = oc_directos_ctrl & oc_camion_ctrl
+        n_oc_sin_stock = info.get("oc_sin_stock", 0)
+        n_oc_en_camion = detalle["Pedido (OC)"].nunique() if not detalle.empty else 0
         st.markdown(
             f"- Filas crudas de la hoja **{cfg['hoja']}** en la semana {semana} "
             f"(1 fila por producto/SKU): **{n_filas_crudas}**\n"
@@ -3071,17 +3115,23 @@ def render_plan_hoja(archivo, cfg: dict):
             f"**{len(oc_100_directas)}**\n"
             f"- OC con líneas mixtas (parte Directo + parte en camión, sí cuentan en "
             f"el Plan): **{len(oc_mixtas)}**\n"
+            f"- OC sin stock disponible (quedaron en 0 pallets tras sacar Directos, "
+            f"no van en camión todavía): **{n_oc_sin_stock}**\n"
             f"- OC finales que van en camión (= filas del Plan de Despacho): "
-            f"**{len(detalle)}**"
+            f"**{n_oc_en_camion}**\n"
+            f"- Verificación: {n_oc_unicas} totales − {len(oc_100_directas)} 100% Directas "
+            f"− {n_oc_sin_stock} sin stock = **{n_oc_unicas - len(oc_100_directas) - n_oc_sin_stock}** "
+            f"(debería calzar con las {n_oc_en_camion} que van en camión)."
         )
-        st.caption("Si 'OC únicas' menos 'OC 100% Directas' no calza con las OC "
-                   "finales, puede haber Pedidos duplicados con datos distintos en "
-                   "la hoja de origen — revisa esos casos en el Refresh.")
+        st.caption("Si la verificación de arriba no calza, puede haber Pedidos "
+                   "duplicados con datos distintos en la hoja de origen — revisa esos "
+                   "casos en el Refresh.")
 
     with st.expander("📈 KPIs y análisis adicionales", expanded=True):
         dias_orden = [d for d in cfg["dias_opciones"] if d in dias]
         render_kpis_avanzados(resumen, detalle, tabla_directos, cfg,
-                               vueltas_por_camion, dias_orden, key_ns)
+                               vueltas_por_camion, dias_orden, key_ns,
+                               tabla_sin_stock=tabla_sin_stock)
 
     # Capacidad máxima real disponible = el camión/rampla más grande que se
     # pueda usar (incluye la rampla de rescate). Una OC individual con más
@@ -3151,6 +3201,17 @@ def render_plan_hoja(archivo, cfg: dict):
         st.caption(f"{info['lineas_directos']} líneas / {info['oc_directos']} OC con "
                    "proveedor directo asignado.")
         st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
+
+    if not tabla_sin_stock.empty:
+        st.subheader("Sin stock disponible (información, NO ocupan camión/ventana)")
+        st.caption(f"{info.get('oc_sin_stock', 0)} OC cuyo total de '1 Posible' quedó en 0 "
+                   "pallets esta semana (sin stock disponible para despachar todavía, "
+                   "descontando lo que ya es Directo). No se pierden: aparecerán solas "
+                   "en cuanto tengan algo de 1er Posible.")
+        st.dataframe(
+            tabla_sin_stock.style.format({"Monto": lambda v: formato_clp(v)}),
+            use_container_width=True, hide_index=True,
+        )
 
 
 def render():
