@@ -3206,7 +3206,11 @@ def render_plan_hoja(archivo, cfg: dict):
         st.subheader("Directos (información, NO ocupan camión/ventana)")
         st.caption(f"{info['lineas_directos']} líneas / {info['oc_directos']} OC con "
                    "proveedor directo asignado.")
-        st.dataframe(tabla_directos, use_container_width=True, hide_index=True)
+        tabla_directos_vista = tabla_directos.sort_values("Monto", ascending=False)
+        st.dataframe(
+            tabla_directos_vista.style.format({"Monto": lambda v: formato_clp(v)}),
+            use_container_width=True, hide_index=True,
+        )
 
     if not tabla_sin_stock.empty:
         st.subheader("Sin stock disponible (información, NO ocupan camión/ventana)")
@@ -3214,8 +3218,12 @@ def render_plan_hoja(archivo, cfg: dict):
                    "pallets esta semana (sin stock disponible para despachar todavía, "
                    "descontando lo que ya es Directo). No se pierden: aparecerán solas "
                    "en cuanto tengan algo de 1er Posible.")
+        tabla_sin_stock_vista = tabla_sin_stock.sort_values("Monto", ascending=False)
+        col_kpi1, col_kpi2 = st.columns(2)
+        col_kpi1.metric("💰 Monto total sin stock", formato_clp(tabla_sin_stock_vista["Monto"].sum()))
+        col_kpi2.metric("📦 Cantidad de pedidos", f"{len(tabla_sin_stock_vista):,}".replace(",", "."))
         st.dataframe(
-            tabla_sin_stock.style.format({"Monto": lambda v: formato_clp(v)}),
+            tabla_sin_stock_vista.style.format({"Monto": lambda v: formato_clp(v)}),
             use_container_width=True, hide_index=True,
         )
 
