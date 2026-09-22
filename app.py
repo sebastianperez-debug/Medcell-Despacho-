@@ -427,7 +427,13 @@ def agrupar_por_oc(df_camion: pd.DataFrame, pallet_col: str, cfg: dict) -> pd.Da
     """Agrupa por Pedido (=OC) SOLO las lineas que van por camion (sin Directos)
     y clasifica prioridad."""
     if df_camion.empty:
-        return df_camion
+        cols_agg = ["Pedido", "oc", "fecha_vence", "division", "sol", "pos1",
+                    "pallets", "monto", "n_sku", "pv", "campana",
+                    "requiere_produccion", "prioridad", "prioridad_label",
+                    "pallets_empaque"]
+        agg_vacio = pd.DataFrame(columns=cols_agg)
+        sin_stock_vacio = pd.DataFrame(columns=cols_agg)
+        return agg_vacio, sin_stock_vacio
 
     agg_kwargs = dict(
         oc=(cfg["oc"], "first"),
